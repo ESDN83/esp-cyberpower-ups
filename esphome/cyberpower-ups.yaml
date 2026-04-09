@@ -1,0 +1,258 @@
+esphome:
+  name: cyberpower-ups
+  friendly_name: CyberPower UPS Monitor
+  platformio_options:
+    board_build.flash_mode: dio
+
+esp32:
+  board: esp32-s3-devkitc-1
+  variant: esp32s3
+  framework:
+    type: esp-idf
+    version: recommended
+    sdkconfig_options:
+      CONFIG_USB_OTG_SUPPORTED: "y"
+      CONFIG_USB_HOST_CONTROL_TRANSFER_MAX_SIZE: "1024"
+
+# CyberPower UPS component from GitHub
+external_components:
+  - source:
+      type: git
+      url: https://github.com/ESDN83/esp-cyberpower-ups
+      ref: master
+    components: [cyberpower_ups]
+    refresh: 0s
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+  ap:
+    ssid: "CyberPower-UPS"
+    password: "upsmonitor123"
+
+logger:
+  level: DEBUG
+  hardware_uart: UART0  # CRITICAL: USB_SERIAL_JTAG (default) blocks GPIO19/20 needed for USB host!
+
+safe_mode:
+  boot_is_good_after: 5s
+  num_attempts: 20
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+# ── UPS Component ─────────────────────────────────────────────
+cyberpower_ups:
+  id: ups
+
+# ── Sensors ───────────────────────────────────────────────────
+# All values are read from the UPS via USB HID and exposed as
+# native ESPHome sensors → appear automatically in Home Assistant.
+
+sensor:
+  - platform: template
+    name: "Netzspannung"
+    id: utility_voltage
+    unit_of_measurement: "V"
+    device_class: voltage
+    state_class: measurement
+    accuracy_decimals: 0
+    lambda: |-
+      auto data = id(ups).get_data();
+      if (!data.connected) return NAN;
+      return data.utility_voltage;
+    update_interval: 5s
+
+  - platform: template
+    name: "Ausgangsspannung"
+    id: output_voltage
+    unit_of_measurement: "V"
+    device_class: voltage
+    state_class: measurement
+    accuracy_decimals: 0
+    lambda: |-
+      auto data = id(ups).get_data();
+      if (!data.connected) return NAN;
+      return data.output_voltage;
+    update_interval: 5s
+
+  - platform: template
+    name: "Batterieladung"
+    id: battery_capacity
+    unit_of_measurement: "%"
+    device_class: battery
+    state_class: measurement
+    accuracy_decimals: 0
+    lambda: |-
+      auto data = id(ups).get_data();
+      if (!data.connected) return NAN;
+      return data.battery_capacity;
+    update_interval: 5s
+
+  - platform: template
+    name: "Restlaufzeit"
+    id: remaining_runtime
+    unit_of_measurement: "min"
+    icon: "mdi:timer-outline"
+    state_class: measurement
+    accuracy_decimals: 0
+    lambda: |-
+      auto data = id(ups).get_data();
+      if (!data.connected) return NAN;
+      return data.remaining_runtime_sec / 60.0f;
+    update_interval: 5s
+
+  - platform: template
+    name: "Last"
+    id: load_watt
+    unit_of_measurement: "W"
+    device_class: power
+    state_class: measurement
+    accuracy_decimals: 0
+    lambda: |-
+      auto data = id(ups).get_data();
+      if (!data.connected || data.rating_power_va <= 0) return NAN;
+      return data.load_percent / 100.0f * data.rating_power_va * 0.6f;
+    update_interval: 5s
+
+  - platform: template
+    name: "Auslastung"
+    id: load_percent
+    unit_of_measurement: "%"
+    icon: "mdi:gauge"
+    state_class: measurement
+    accuracy_decimals: 0
+    lambda: |-
+      auto data = id(ups).get_data();
+      if (!data.connected) return NAN;
+      return data.load_percent;
+    update_interval: 5s
+
+  - platform: template
+    name: "Nennleistung"
+    id: rating_power
+    unit_of_measurement: "VA"
+    icon: "mdi:flash"
+    entity_category: diagnostic
+    accuracy_decimals: 0
+    lambda: |-
+      auto data = id(ups).get_data();
+      if (!data.connected) return NAN;
+      return data.rating_power_va;
+    update_interval: 60s
+
+  - platform: template
+    name: "Nennspannung"
+    id: rating_voltage
+    unit_of_measurement: "V"
+    device_class: voltage
+    entity_category: diagnostic
+    accuracy_decimals: 0
+    lambda: |-
+      auto data = id(ups).get_data();
+      if (!data.connected) return NAN;
+      return data.rating_voltage;
+    update_interval: 60s
+
+# ── Binary Sensors ────────────────────────────────────────────
+
+binary_sensor:
+  - platform: template
+    name: "USV verbunden"
+    id: ups_connected
+    device_class: connectivity
+    lambda: |-
+      return id(ups).get_data().connected;
+    update_interval: 5s
+
+  - platform: template
+    name: "Netz vorhanden"
+    id: ac_present
+    device_class: power
+    lambda: |-
+      return id(ups).get_data().ac_present;
+    update_interval: 5s
+
+  - platform: template
+    name: "Batteriebetrieb"
+    id: on_battery
+    icon: "mdi:battery-alert"
+    lambda: |-
+      return id(ups).get_data().on_battery;
+    update_interval: 5s
+
+  - platform: template
+    name: "Lädt"
+    id: charging
+    device_class: battery_charging
+    lambda: |-
+      return id(ups).get_data().charging;
+    update_interval: 5s
+
+  - platform: template
+    name: "Überlast"
+    id: overload
+    device_class: problem
+    lambda: |-
+      return id(ups).get_data().overload;
+    update_interval: 5s
+
+  - platform: template
+    name: "Batterie niedrig"
+    id: battery_low
+    device_class: battery
+    lambda: |-
+      return id(ups).get_data().battery_low_flag;
+    update_interval: 5s
+
+  - platform: template
+    name: "Batterie tauschen"
+    id: replace_battery
+    device_class: problem
+    lambda: |-
+      return id(ups).get_data().replace_battery;
+    update_interval: 5s
+
+# ── Text Sensors ──────────────────────────────────────────────
+
+text_sensor:
+  - platform: template
+    name: "USV Status"
+    id: ups_status
+    icon: "mdi:power-plug"
+    lambda: |-
+      auto data = id(ups).get_data();
+      if (!data.connected) return std::string("Getrennt");
+      switch (data.power_state) {
+        case esphome::cyberpower_ups::PowerState::NORMAL: return std::string("Normal");
+        case esphome::cyberpower_ups::PowerState::POWER_FAIL_GRACE: return std::string("Stromausfall");
+        case esphome::cyberpower_ups::PowerState::BATTERY_LOW: return std::string("Batterie niedrig");
+        case esphome::cyberpower_ups::PowerState::SHUTDOWN_IMMINENT: return std::string("Shutdown!");
+        default: return std::string("Unbekannt");
+      }
+    update_interval: 5s
+
+  - platform: template
+    name: "USV Modell"
+    id: ups_model
+    icon: "mdi:information"
+    entity_category: diagnostic
+    lambda: |-
+      auto data = id(ups).get_data();
+      return std::string(data.model);
+    update_interval: 60s
+
+  - platform: template
+    name: "Letztes Ereignis"
+    id: last_power_event
+    icon: "mdi:lightning-bolt"
+    lambda: |-
+      auto data = id(ups).get_data();
+      return std::string(data.last_event);
+    update_interval: 5s
