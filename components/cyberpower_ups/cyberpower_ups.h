@@ -209,6 +209,12 @@ class CyberpowerUpsComponent : public Component {
     }
   }
 
+  // ── USB Enum Filter (MUST return true or devices are silently skipped!) ──
+  static bool enum_filter_allow_all_(const usb_device_desc_t *dev_desc, uint8_t *bConfigurationValue) {
+    ESP_LOGI(TAG, "Enum filter: ALLOW VID=%04X PID=%04X", dev_desc->idVendor, dev_desc->idProduct);
+    return true;
+  }
+
   // ── USB Host Library Task ─────────────────────────────────
   static void usb_lib_task_entry_(void *arg) {
     auto *self = static_cast<CyberpowerUpsComponent *>(arg);
@@ -220,7 +226,7 @@ class CyberpowerUpsComponent : public Component {
     host_config.skip_phy_setup = false;
     host_config.intr_flags = ESP_INTR_FLAG_LEVEL1;
     #ifdef CONFIG_USB_HOST_ENABLE_ENUM_FILTER_CALLBACK
-    host_config.enum_filter_cb = nullptr;
+    host_config.enum_filter_cb = enum_filter_allow_all_;
     #endif
 
     esp_err_t err = usb_host_install(&host_config);
@@ -849,10 +855,10 @@ inline void CyberpowerUpsComponent::setup() {
   load_config_();
 
   // Start USB host library task
-  xTaskCreatePinnedToCore(usb_lib_task_entry_, "usb_lib", 4096, this, 10, nullptr, 0);
+  xTaskCreatePinnedToCore(usb_lib_task_entry_, "usb_lib", 8192, this, 10, nullptr, 0);
 
   // Start USB monitor task
-  xTaskCreatePinnedToCore(usb_mon_task_entry_, "usb_mon", 4096, this, 5, nullptr, 1);
+  xTaskCreatePinnedToCore(usb_mon_task_entry_, "usb_mon", 8192, this, 5, nullptr, 1);
 
   // Start web UI
   start_web_ui_(this);
