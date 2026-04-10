@@ -680,7 +680,8 @@ class CyberpowerUpsComponent : public Component {
     // Input (utility) voltage — Page 0x84, within Input collection
     auto *f = report_map_.find(USAGE_PAGE_POWER_DEVICE, PD_USAGE_VOLTAGE);
     if (f && read_field_value_(f, val)) {
-      data_.utility_voltage = apply_exponent(val, f->unit_exponent);
+      ESP_LOGD(TAG, "Voltage raw=%d exp=%d", val, f->unit_exponent);
+      data_.utility_voltage = (float)val;  // CyberPower reports whole volts
     }
 
     // Battery capacity
@@ -692,7 +693,8 @@ class CyberpowerUpsComponent : public Component {
     // Runtime to empty (seconds)
     f = report_map_.find(USAGE_PAGE_BATTERY, BAT_USAGE_RUNTIME_TO_EMPTY);
     if (f && read_field_value_(f, val)) {
-      data_.remaining_runtime_sec = apply_exponent(val, f->unit_exponent);
+      ESP_LOGD(TAG, "Runtime raw=%d exp=%d", val, f->unit_exponent);
+      data_.remaining_runtime_sec = (float)val;  // CyberPower reports whole seconds
     }
 
     // Percent load
@@ -704,13 +706,15 @@ class CyberpowerUpsComponent : public Component {
     // Config voltage (rating)
     f = report_map_.find(USAGE_PAGE_POWER_DEVICE, PD_USAGE_CONFIG_VOLTAGE);
     if (f && read_field_value_(f, val)) {
-      data_.rating_voltage = apply_exponent(val, f->unit_exponent);
+      ESP_LOGD(TAG, "ConfigVoltage raw=%d exp=%d", val, f->unit_exponent);
+      data_.rating_voltage = (float)val;
     }
 
     // Config apparent power (rating VA)
     f = report_map_.find(USAGE_PAGE_POWER_DEVICE, PD_USAGE_CONFIG_APPARENT_POWER);
     if (f && read_field_value_(f, val)) {
-      data_.rating_power_va = apply_exponent(val, f->unit_exponent);
+      ESP_LOGD(TAG, "ConfigPower raw=%d exp=%d", val, f->unit_exponent);
+      data_.rating_power_va = (float)val;
     }
 
     // Output voltage — try to find a second voltage field in output collection
