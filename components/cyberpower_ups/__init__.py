@@ -27,8 +27,9 @@ async def to_code(config):
     add_idf_sdkconfig_option("CONFIG_HTTPD_MAX_REQ_HDR_LEN", 1024)
     add_idf_sdkconfig_option("CONFIG_LWIP_MAX_SOCKETS", 16)
 
-    # USB HID host support
-    add_idf_sdkconfig_option("CONFIG_USB_HOST_HUBS_SUPPORTED", False)
+    # USB HID host support — hub required for low-speed devices (most UPS are 1.5Mbps)
+    add_idf_sdkconfig_option("CONFIG_USB_HOST_HUBS_SUPPORTED", True)
+    add_idf_sdkconfig_option("CONFIG_USB_HOST_HUB_MULTI_LEVEL", True)
     add_idf_sdkconfig_option("CONFIG_USB_HOST_ENABLE_ENUM_FILTER_CALLBACK", True)
 
     # PSRAM can cause USB host interrupts to be missed (ESP-IDF #9519)
