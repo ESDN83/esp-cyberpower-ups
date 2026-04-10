@@ -315,10 +315,28 @@ class CyberpowerUpsComponent : public Component {
         vTaskDelay(pdMS_TO_TICKS(POLL_INTERVAL_MS));
         heartbeat = 0;
       } else {
-        // Heartbeat log every 30s when no device connected
+        // Heartbeat + active device scan every 10s when no device connected
         heartbeat++;
-        if (heartbeat >= 150) {  // 150 * 200ms = 30s
-          ESP_LOGD(TAG, "USB monitor: no device detected (addr=%d, open=%d)", dev_addr_, device_open_);
+        if (heartbeat >= 50) {  // 50 * 200ms = 10s
+          // Try to actively list devices known to the USB host library
+          int num_devs = 0;
+          uint8_t dev_addrs[8] = {};
+          usb_host_device_addr_list_fill(sizeof(dev_addrs), dev_addrs, &num_devs);
+          ESP_LOGW(TAG, "USB scan: %d device(s) known to host lib, cb_addr=%d, open=%d",
+                   num_devs, dev_addr_, device_open_);
+          char msg[80];
+          snprintf(msg, sizeof(msg), "USB scan: %d devices, cb_addr=%d", num_devs, dev_addr_);
+          log_ring_append_(msg);
+
+          if (num_devs > 0) {
+            for (int i = 0; i < num_devs; i++) {
+              ESP_LOGW(TAG, "  Device at address %d (trying to open...)", dev_addrs[i]);
+              // If callback missed it, try opening directly
+              if (dev_addr_ == 0 && !device_open_) {
+                dev_addr_ = dev_addrs[i];
+              }
+            }
+          }
           heartbeat = 0;
         }
       }
