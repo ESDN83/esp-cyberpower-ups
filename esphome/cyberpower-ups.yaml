@@ -169,7 +169,6 @@ binary_sensor:
     device_class: connectivity
     lambda: |-
       return id(ups).get_data().connected;
-    update_interval: 5s
 
   - platform: template
     name: "AC Present"
@@ -177,7 +176,6 @@ binary_sensor:
     device_class: power
     lambda: |-
       return id(ups).get_data().ac_present;
-    update_interval: 5s
 
   - platform: template
     name: "On Battery"
@@ -185,7 +183,6 @@ binary_sensor:
     icon: "mdi:battery-alert"
     lambda: |-
       return id(ups).get_data().on_battery;
-    update_interval: 5s
 
   - platform: template
     name: "Charging"
@@ -193,7 +190,6 @@ binary_sensor:
     device_class: battery_charging
     lambda: |-
       return id(ups).get_data().charging;
-    update_interval: 5s
 
   - platform: template
     name: "Overload"
@@ -201,7 +197,6 @@ binary_sensor:
     device_class: problem
     lambda: |-
       return id(ups).get_data().overload;
-    update_interval: 5s
 
   - platform: template
     name: "Battery Low"
@@ -209,7 +204,6 @@ binary_sensor:
     device_class: battery
     lambda: |-
       return id(ups).get_data().battery_low_flag;
-    update_interval: 5s
 
   - platform: template
     name: "Replace Battery"
@@ -217,7 +211,6 @@ binary_sensor:
     device_class: problem
     lambda: |-
       return id(ups).get_data().replace_battery;
-    update_interval: 5s
 
 # ── Text Sensors ──────────────────────────────────────────────
 
