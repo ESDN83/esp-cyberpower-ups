@@ -261,6 +261,9 @@ class CyberpowerUpsComponent : public Component {
   }
 
   void usb_mon_task_() {
+    // Small delay to let USB host library fully initialize
+    vTaskDelay(pdMS_TO_TICKS(500));
+
     // Register client
     usb_host_client_config_t client_config = {};
     client_config.is_synchronous = false;
@@ -271,18 +274,35 @@ class CyberpowerUpsComponent : public Component {
     esp_err_t err = usb_host_client_register(&client_config, &client_hdl_);
     if (err != ESP_OK) {
       ESP_LOGE(TAG, "Client register failed: %s", esp_err_to_name(err));
+      log_ring_append_("FATAL: Client register failed");
       vTaskDelete(nullptr);
       return;
     }
+    ESP_LOGI(TAG, "USB client registered successfully");
+    log_ring_append_("USB client registered");
 
     // Allocate control transfer
-    usb_host_transfer_alloc(CTRL_BUF_SIZE, 0, &ctrl_xfer_);
+    err = usb_host_transfer_alloc(CTRL_BUF_SIZE, 0, &ctrl_xfer_);
+    if (err != ESP_OK) {
+      ESP_LOGE(TAG, "Transfer alloc failed: %s", esp_err_to_name(err));
+      log_ring_append_("FATAL: Transfer alloc failed");
+    }
     ctrl_xfer_->callback = ctrl_xfer_cb_;
     ctrl_xfer_->context = this;
 
+    ESP_LOGI(TAG, "Waiting for USB devices... (hub support: %s)",
+    #ifdef CONFIG_USB_HOST_HUBS_SUPPORTED
+      "YES"
+    #else
+      "NO"
+    #endif
+    );
+    log_ring_append_("Waiting for USB devices...");
+
+    uint32_t heartbeat = 0;
     while (true) {
       // Pump client events
-      usb_host_client_handle_events(client_hdl_, 100);
+      usb_host_client_handle_events(client_hdl_, 200);
 
       // New device detected?
       if (dev_addr_ != 0 && !device_open_) {
@@ -293,6 +313,14 @@ class CyberpowerUpsComponent : public Component {
       if (device_open_) {
         poll_ups_data_();
         vTaskDelay(pdMS_TO_TICKS(POLL_INTERVAL_MS));
+        heartbeat = 0;
+      } else {
+        // Heartbeat log every 30s when no device connected
+        heartbeat++;
+        if (heartbeat >= 150) {  // 150 * 200ms = 30s
+          ESP_LOGD(TAG, "USB monitor: no device detected (addr=%d, open=%d)", dev_addr_, device_open_);
+          heartbeat = 0;
+        }
       }
     }
   }
