@@ -5,6 +5,9 @@
 //
 // Simple status page and configuration for thresholds.
 // Runs on port 80 via ESP-IDF HTTP server.
+//
+// NOTE: This file is included from cyberpower_ups.h AFTER the
+// full class definition, so CyberpowerUpsComponent is complete.
 // ═══════════════════════════════════════════════════════════════
 
 #include "esp_http_server.h"
@@ -15,20 +18,11 @@
 #include <cstring>
 #include <cstdio>
 
-namespace esphome {
-namespace cyberpower_ups {
-
-// Forward declare
-class CyberpowerUpsComponent;
+// No namespace open here — we are already inside esphome::cyberpower_ups
+// because this file is #included from within that namespace in cyberpower_ups.h
 
 static httpd_handle_t httpd_ = nullptr;
 static CyberpowerUpsComponent *web_component_ = nullptr;
-
-// ── Log Ring accessors (defined in cyberpower_ups.h) ────────
-extern char log_ring_[];
-extern size_t log_ring_head_;
-extern SemaphoreHandle_t log_ring_mutex_;
-static constexpr size_t LOG_RING_SIZE_WEB = 8192;
 
 // ── HTML Page Generator ─────────────────────────────────────
 static esp_err_t root_handler_(httpd_req_t *req) {
@@ -106,10 +100,10 @@ static esp_err_t root_handler_(httpd_req_t *req) {
   httpd_resp_send_chunk(req, buf, len);
 
   // Status flags
-  const char *state_class = "ok";
-  if (data.power_state == PowerState::POWER_FAIL_GRACE) state_class = "warn";
-  if (data.power_state == PowerState::BATTERY_LOW) state_class = "err";
-  if (data.power_state == PowerState::SHUTDOWN_IMMINENT) state_class = "err";
+  const char *state_css = "ok";
+  if (data.power_state == PowerState::POWER_FAIL_GRACE) state_css = "warn";
+  if (data.power_state == PowerState::BATTERY_LOW) state_css = "err";
+  if (data.power_state == PowerState::SHUTDOWN_IMMINENT) state_css = "err";
 
   len = snprintf(buf, sizeof(buf),
     "<div class='card'><h2>Status</h2>"
@@ -130,7 +124,7 @@ static esp_err_t root_handler_(httpd_req_t *req) {
     "<div class='item'><span class='label'>Last Event</span>"
     "<span class='value'>%s</span></div>"
     "</div>",
-    state_class, power_state_str(data.power_state),
+    state_css, power_state_str(data.power_state),
     data.ac_present ? "bool-on" : "bool-off", data.ac_present ? "Yes" : "No",
     data.on_battery ? "bool-on" : "bool-off", data.on_battery ? "Yes" : "No",
     data.charging ? "bool-on" : "bool-off", data.charging ? "Yes" : "No",
@@ -212,15 +206,13 @@ static esp_err_t log_handler_(httpd_req_t *req) {
 
   xSemaphoreTake(log_ring_mutex_, portMAX_DELAY);
 
-  // Simple: dump the entire ring buffer from head (oldest) to head-1 (newest)
-  // Skip null bytes (unfilled portion)
   char line[256];
   size_t pos = log_ring_head_;
   size_t line_pos = 0;
 
-  for (size_t i = 0; i < LOG_RING_SIZE_WEB; i++) {
+  for (size_t i = 0; i < LOG_RING_SIZE; i++) {
     char c = log_ring_[pos];
-    pos = (pos + 1) % LOG_RING_SIZE_WEB;
+    pos = (pos + 1) % LOG_RING_SIZE;
 
     if (c == '\0') continue;
     if (c == '\n' || line_pos >= sizeof(line) - 2) {
@@ -269,6 +261,3 @@ static void start_web_ui_(CyberpowerUpsComponent *component) {
 
   ESP_LOGI("web_ui", "Web UI started on port 80");
 }
-
-}  // namespace cyberpower_ups
-}  // namespace esphome

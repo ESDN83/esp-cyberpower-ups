@@ -23,19 +23,19 @@
 
 #include "esp_system.h"
 #include "esp_event.h"
+#include "esp_timer.h"
 
 #include <atomic>
 #include <cstring>
 #include <cmath>
 
 #include "hid_ups_protocol.h"
-#include "web_ui.h"
 
 namespace esphome {
 namespace cyberpower_ups {
 
 static const char *const TAG = "cyberpower_ups";
-static const char *const FW_BUILD_ID = "cyberpower-ups build 2026-04-09-a";
+static const char *const FW_BUILD_ID = "cyberpower-ups build 2026-04-10-a";
 
 // CyberPower USB identifiers
 static constexpr uint16_t CYBERPOWER_VID = 0x0764;
@@ -135,41 +135,8 @@ class CyberpowerUpsComponent : public Component {
  public:
   float get_setup_priority() const override { return setup_priority::AFTER_WIFI; }
 
-  void setup() override {
-    ESP_LOGI(TAG, "CyberPower UPS Monitor starting... (%s)", FW_BUILD_ID);
-    log_ring_init_();
-
-    data_mutex_ = xSemaphoreCreateMutex();
-    ctrl_sem_ = xSemaphoreCreateBinary();
-
-    // Load config from NVS
-    load_config_();
-
-    // Start USB host library task
-    xTaskCreatePinnedToCore(usb_lib_task_entry_, "usb_lib", 4096, this, 10, nullptr, 0);
-
-    // Start USB monitor task
-    xTaskCreatePinnedToCore(usb_mon_task_entry_, "usb_mon", 4096, this, 5, nullptr, 1);
-
-    // Start web UI
-    start_web_ui_(this);
-
-    log_ring_append_("Component initialized");
-  }
-
-  void loop() override {
-    // Publish sensor values to ESPHome from main loop (thread-safe)
-    if (!publish_pending_) return;
-    publish_pending_ = false;
-
-    UpsData snapshot;
-    xSemaphoreTake(data_mutex_, portMAX_DELAY);
-    snapshot = data_;
-    xSemaphoreGive(data_mutex_);
-
-    // Publish via ESPHome API — these are picked up by HA automatically
-    publish_sensors_(snapshot);
-  }
+  void setup() override;
+  void loop() override;
 
   // ── Public accessors for Web UI ───────────────────────────
   UpsData get_data() {
@@ -733,17 +700,16 @@ class CyberpowerUpsComponent : public Component {
   // Must be called with data_mutex_ held!
   void update_power_state_() {
     uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);  // millis
-    PowerState prev = data_.power_state;
 
     // ── Transitions ──
 
-    // AC returned → back to normal
+    // AC returned -> back to normal
     if (data_.ac_present && !data_.on_battery) {
       if (data_.power_state != PowerState::NORMAL) {
         data_.power_state = PowerState::NORMAL;
         set_event_("AC Restored");
-        ESP_LOGI(TAG, "AC restored, state → NORMAL");
-        log_ring_append_("AC restored → NORMAL");
+        ESP_LOGI(TAG, "AC restored, state -> NORMAL");
+        log_ring_append_("AC restored -> NORMAL");
       }
       return;
     }
@@ -794,8 +760,6 @@ class CyberpowerUpsComponent : public Component {
           set_event_("Power Failure");
           ESP_LOGW(TAG, "Power failure grace period expired!");
           log_ring_append_("Power failure event fired (grace expired)");
-          // Stay in POWER_FAIL_GRACE, event is fired. Will transition to BATTERY_LOW
-          // when thresholds are hit.
         }
       }
     }
@@ -807,44 +771,58 @@ class CyberpowerUpsComponent : public Component {
     data_.last_event_time = (uint32_t)(esp_timer_get_time() / 1000000);  // seconds since boot
 
     // Fire ESPHome custom event
-    // This will be available in HA as esphome.cyberpower_ups event
     fire_homeassistant_event_(event);
   }
 
   void fire_homeassistant_event_(const char *event_type) {
-    // ESPHome fires events via homeassistant.event service
-    // These events are visible in HA automations
     ESP_LOGI(TAG, "Firing HA event: cyberpower_ups / %s", event_type);
   }
 
   // ── Publish Sensor Values to ESPHome ──────────────────────
   void publish_sensors_(const UpsData &d) {
-    // These will be called from loop() on the main thread.
-    // ESPHome sensors are registered in the YAML config and
-    // published here via their IDs.
-    //
-    // The actual sensor objects are managed by ESPHome's code generator.
-    // For a custom component, we use id() lookups or direct sensor pointers.
-    //
-    // Since we define sensors in __init__.py / YAML, ESPHome generates
-    // global sensor variables that we publish to.
-    //
-    // For now, we store values in UpsData and the web UI reads them.
-    // The ESPHome sensor integration is configured via lambda in YAML:
-    //
-    //   sensor:
-    //     - platform: template
-    //       name: "Utility Voltage"
-    //       id: utility_voltage
-    //       lambda: |-
-    //         auto data = id(ups).get_data();
-    //         return data.utility_voltage;
-    //       update_interval: 5s
-    //
-    // This keeps the component simple and lets the user configure
-    // exactly which sensors they want in YAML.
+    // Values are stored in UpsData and read by template sensor lambdas in YAML.
+    // No direct publishing needed — ESPHome template sensors poll get_data().
   }
 };
+
+// ── Include web UI (needs full class definition) ────────────
+#include "web_ui.h"
+
+// ── Deferred method implementations ─────────────────────────
+inline void CyberpowerUpsComponent::setup() {
+  ESP_LOGI(TAG, "CyberPower UPS Monitor starting... (%s)", FW_BUILD_ID);
+  log_ring_init_();
+
+  data_mutex_ = xSemaphoreCreateMutex();
+  ctrl_sem_ = xSemaphoreCreateBinary();
+
+  // Load config from NVS
+  load_config_();
+
+  // Start USB host library task
+  xTaskCreatePinnedToCore(usb_lib_task_entry_, "usb_lib", 4096, this, 10, nullptr, 0);
+
+  // Start USB monitor task
+  xTaskCreatePinnedToCore(usb_mon_task_entry_, "usb_mon", 4096, this, 5, nullptr, 1);
+
+  // Start web UI
+  start_web_ui_(this);
+
+  log_ring_append_("Component initialized");
+}
+
+inline void CyberpowerUpsComponent::loop() {
+  // Publish sensor values to ESPHome from main loop (thread-safe)
+  if (!publish_pending_) return;
+  publish_pending_ = false;
+
+  UpsData snapshot;
+  xSemaphoreTake(data_mutex_, portMAX_DELAY);
+  snapshot = data_;
+  xSemaphoreGive(data_mutex_);
+
+  publish_sensors_(snapshot);
+}
 
 }  // namespace cyberpower_ups
 }  // namespace esphome
