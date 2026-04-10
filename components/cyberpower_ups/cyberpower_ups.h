@@ -834,7 +834,7 @@ class CyberpowerUpsComponent : public Component {
     //
     //   sensor:
     //     - platform: template
-    //       name: "Netzspannung"
+    //       name: "Utility Voltage"
     //       id: utility_voltage
     //       lambda: |-
     //         auto data = id(ups).get_data();

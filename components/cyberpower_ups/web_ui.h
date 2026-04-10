@@ -63,16 +63,16 @@ static esp_err_t root_handler_(httpd_req_t *req) {
     "<h1>&#9889; CyberPower UPS Monitor</h1>"
 
     // Connection status
-    "<div class='card'><h2>Verbindung</h2>"
-    "<div class='item'><span class='label'>USV verbunden</span>"
+    "<div class='card'><h2>Connection</h2>"
+    "<div class='item'><span class='label'>UPS Connected</span>"
     "<span class='status %s'>%s</span></div>"
-    "<div class='item'><span class='label'>Modell</span>"
+    "<div class='item'><span class='label'>Model</span>"
     "<span class='value'>%s</span></div>"
     "<div class='item'><span class='label'>Serial</span>"
     "<span class='value'>%s</span></div>"
     "</div>",
     data.connected ? "ok" : "err",
-    data.connected ? "Verbunden" : "Getrennt",
+    data.connected ? "Connected" : "Disconnected",
     data.model[0] ? data.model : "-",
     data.serial[0] ? data.serial : "-");
 
@@ -84,18 +84,18 @@ static esp_err_t root_handler_(httpd_req_t *req) {
     : 0;
 
   len = snprintf(buf, sizeof(buf),
-    "<div class='card'><h2>Messwerte</h2><div class='grid'>"
-    "<div class='item'><span class='label'>Netzspannung</span>"
+    "<div class='card'><h2>Readings</h2><div class='grid'>"
+    "<div class='item'><span class='label'>Utility Voltage</span>"
     "<span class='value'>%.0f V</span></div>"
-    "<div class='item'><span class='label'>Ausgangsspannung</span>"
+    "<div class='item'><span class='label'>Output Voltage</span>"
     "<span class='value'>%.0f V</span></div>"
-    "<div class='item'><span class='label'>Batterieladung</span>"
+    "<div class='item'><span class='label'>Battery Capacity</span>"
     "<span class='value'>%.0f %%</span></div>"
-    "<div class='item'><span class='label'>Restlaufzeit</span>"
+    "<div class='item'><span class='label'>Remaining Runtime</span>"
     "<span class='value'>%.0f min</span></div>"
-    "<div class='item'><span class='label'>Last</span>"
+    "<div class='item'><span class='label'>Load</span>"
     "<span class='value'>%.0f W (%.0f %%)</span></div>"
-    "<div class='item'><span class='label'>Nennleistung</span>"
+    "<div class='item'><span class='label'>Rating Power</span>"
     "<span class='value'>%.0f VA</span></div>"
     "</div></div>",
     data.utility_voltage, data.output_voltage,
@@ -113,45 +113,45 @@ static esp_err_t root_handler_(httpd_req_t *req) {
 
   len = snprintf(buf, sizeof(buf),
     "<div class='card'><h2>Status</h2>"
-    "<div class='item'><span class='label'>Zustand</span>"
+    "<div class='item'><span class='label'>State</span>"
     "<span class='status %s'>%s</span></div>"
-    "<div class='item'><span class='label'>Netz vorhanden</span>"
+    "<div class='item'><span class='label'>AC Present</span>"
     "<span class='%s'>%s</span></div>"
-    "<div class='item'><span class='label'>Batteriebetrieb</span>"
+    "<div class='item'><span class='label'>On Battery</span>"
     "<span class='%s'>%s</span></div>"
-    "<div class='item'><span class='label'>L&auml;dt</span>"
+    "<div class='item'><span class='label'>Charging</span>"
     "<span class='%s'>%s</span></div>"
-    "<div class='item'><span class='label'>&Uuml;berlast</span>"
+    "<div class='item'><span class='label'>Overload</span>"
     "<span class='%s'>%s</span></div>"
-    "<div class='item'><span class='label'>Batterie niedrig</span>"
+    "<div class='item'><span class='label'>Battery Low</span>"
     "<span class='%s'>%s</span></div>"
-    "<div class='item'><span class='label'>Batterie tauschen</span>"
+    "<div class='item'><span class='label'>Replace Battery</span>"
     "<span class='%s'>%s</span></div>"
-    "<div class='item'><span class='label'>Letztes Ereignis</span>"
+    "<div class='item'><span class='label'>Last Event</span>"
     "<span class='value'>%s</span></div>"
     "</div>",
     state_class, power_state_str(data.power_state),
-    data.ac_present ? "bool-on" : "bool-off", data.ac_present ? "Ja" : "Nein",
-    data.on_battery ? "bool-on" : "bool-off", data.on_battery ? "Ja" : "Nein",
-    data.charging ? "bool-on" : "bool-off", data.charging ? "Ja" : "Nein",
-    data.overload ? "bool-on" : "bool-off", data.overload ? "Ja" : "Nein",
-    data.battery_low_flag ? "bool-on" : "bool-off", data.battery_low_flag ? "Ja" : "Nein",
-    data.replace_battery ? "bool-on" : "bool-off", data.replace_battery ? "Ja" : "Nein",
+    data.ac_present ? "bool-on" : "bool-off", data.ac_present ? "Yes" : "No",
+    data.on_battery ? "bool-on" : "bool-off", data.on_battery ? "Yes" : "No",
+    data.charging ? "bool-on" : "bool-off", data.charging ? "Yes" : "No",
+    data.overload ? "bool-on" : "bool-off", data.overload ? "Yes" : "No",
+    data.battery_low_flag ? "bool-on" : "bool-off", data.battery_low_flag ? "Yes" : "No",
+    data.replace_battery ? "bool-on" : "bool-off", data.replace_battery ? "Yes" : "No",
     data.last_event);
 
   httpd_resp_send_chunk(req, buf, len);
 
   // Config form
   len = snprintf(buf, sizeof(buf),
-    "<div class='card'><h2>Schwellwerte</h2>"
+    "<div class='card'><h2>Thresholds</h2>"
     "<form action='/config' method='POST'>"
-    "<div class='item'><span class='label'>Power-Failure Verz&ouml;gerung (s)</span>"
+    "<div class='item'><span class='label'>Power Failure Delay (s)</span>"
     "<input type='number' name='pf_delay' value='%lu' min='0' max='600'></div>"
-    "<div class='item'><span class='label'>Battery-Low Laufzeit (s)</span>"
+    "<div class='item'><span class='label'>Battery Low Runtime (s)</span>"
     "<input type='number' name='bl_runtime' value='%lu' min='0' max='3600'></div>"
-    "<div class='item'><span class='label'>Battery-Low Kapazit&auml;t (%%)</span>"
+    "<div class='item'><span class='label'>Battery Low Capacity (%%)</span>"
     "<input type='number' name='bl_capacity' value='%lu' min='0' max='100'></div>"
-    "<div style='text-align:right;margin-top:12px'><button type='submit'>Speichern</button></div>"
+    "<div style='text-align:right;margin-top:12px'><button type='submit'>Save</button></div>"
     "</form></div>",
     web_component_->get_power_fail_delay(),
     web_component_->get_battery_low_runtime(),

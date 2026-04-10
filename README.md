@@ -1,36 +1,36 @@
 # ESP CyberPower UPS Monitor
 
-ESP32-S3 liest eine CyberPower USV direkt über USB HID aus und stellt alle Daten als native ESPHome-Sensoren in Home Assistant bereit.
+ESP32-S3 reads a CyberPower UPS directly via USB HID and exposes all data as native ESPHome sensors in Home Assistant.
 
-**Kein NUT, kein pwrstat, kein SSH — direkt USB → ESP32 → Home Assistant.**
+**No NUT, no pwrstat, no SSH — direct USB → ESP32 → Home Assistant.**
 
 ## Features
 
-- Direkte USB-HID-Kommunikation mit CyberPower USV (BR1200ELCD und kompatible)
-- Native ESPHome-Sensoren (Spannung, Batterie, Last, Laufzeit, Status)
-- Stromausfall-Erkennung mit konfigurierbaren Schwellwerten
-- HA Events für Automationen (Power Failure, Battery Low, Shutdown Imminent)
-- Web UI für Live-Status und Konfiguration
-- Kein separater Server oder Daemon nötig
+- Direct USB HID communication with CyberPower UPS (BR1200ELCD and compatible)
+- Native ESPHome sensors (voltage, battery, load, runtime, status)
+- Power failure detection with configurable thresholds
+- HA events for automations (Power Failure, Battery Low, Shutdown Imminent)
+- Web UI for live status and configuration
+- No separate server or daemon required
 
 ## Hardware
 
-| Komponente | Details |
+| Component | Details |
 |-----------|---------|
-| **USV** | CyberPower BR1200ELCD (oder kompatibel) |
+| **UPS** | CyberPower BR1200ELCD (or compatible) |
 | **MCU** | ESP32-S3-DevKitC-1 |
-| **Verbindung** | USB-A Kabel von USV direkt an ESP32-S3 OTG Port |
+| **Connection** | USB-A cable from UPS directly to ESP32-S3 OTG Port |
 
-> **Wichtig:** Logger auf `UART0` setzen! Der Default `USB_SERIAL_JTAG` blockiert die GPIO19/20 Pins die für USB Host gebraucht werden.
+> **Important:** Set logger to `UART0`! The default `USB_SERIAL_JTAG` blocks the GPIO19/20 pins needed for USB Host.
 
 ## Installation
 
-1. **ESPHome YAML** erstellen (siehe `esphome/cyberpower-ups.yaml`)
-2. **Flashen** über ESPHome Dashboard oder CLI
-3. **USB-Kabel** von USV an ESP32-S3 OTG Port anschließen
-4. **Home Assistant** erkennt das Gerät automatisch über ESPHome API
+1. **Create ESPHome YAML** (see `esphome/cyberpower-ups.yaml`)
+2. **Flash** via ESPHome Dashboard or CLI
+3. **Connect USB cable** from UPS to ESP32-S3 OTG Port
+4. **Home Assistant** discovers the device automatically via ESPHome API
 
-### Minimale YAML Config
+### Minimal YAML Config
 
 ```yaml
 external_components:
@@ -44,89 +44,89 @@ cyberpower_ups:
   id: ups
 ```
 
-Siehe `esphome/cyberpower-ups.yaml` für die vollständige Konfiguration mit allen Sensoren.
+See `esphome/cyberpower-ups.yaml` for the full configuration with all sensors.
 
-## Sensoren in Home Assistant
+## Sensors in Home Assistant
 
-### Messwerte
-| Sensor | Einheit | Beschreibung |
-|--------|---------|-------------|
-| Netzspannung | V | Eingangsspannung vom Netz |
-| Ausgangsspannung | V | Ausgangsspannung der USV |
-| Batterieladung | % | Aktuelle Batteriekapazität |
-| Restlaufzeit | min | Geschätzte Restlaufzeit im Batteriebetrieb |
-| Last | W | Aktuelle Last in Watt |
-| Auslastung | % | Auslastung in Prozent |
+### Readings
+| Sensor | Unit | Description |
+|--------|------|-------------|
+| Utility Voltage | V | Input voltage from mains |
+| Output Voltage | V | UPS output voltage |
+| Battery Capacity | % | Current battery capacity |
+| Remaining Runtime | min | Estimated remaining runtime on battery |
+| Load | W | Current load in watts |
+| Load Percent | % | Load percentage |
 
 ### Status
-| Sensor | Typ | Beschreibung |
-|--------|-----|-------------|
-| USV verbunden | Binary | USB-Verbindung zur USV |
-| Netz vorhanden | Binary | Netzspannung vorhanden |
-| Batteriebetrieb | Binary | USV läuft auf Batterie |
-| Lädt | Binary | Batterie wird geladen |
-| Überlast | Binary | USV ist überlastet |
-| USV Status | Text | Normal / Stromausfall / Batterie niedrig / Shutdown |
+| Sensor | Type | Description |
+|--------|------|-------------|
+| UPS Connected | Binary | USB connection to UPS |
+| AC Present | Binary | Mains voltage present |
+| On Battery | Binary | UPS running on battery |
+| Charging | Binary | Battery is charging |
+| Overload | Binary | UPS is overloaded |
+| UPS Status | Text | Normal / Power Failure / Battery Low / Shutdown |
 
-## Stromausfall-Logik
+## Power Failure Logic
 
-Die Komponente implementiert eine State Machine die die pwrstat-Daemon-Logik repliziert:
+The component implements a state machine that replicates the pwrstat daemon logic:
 
 ```
-NORMAL → POWER_FAIL (nach AC-Verlust, 60s Verzögerung) → BATTERY_LOW → SHUTDOWN_IMMINENT
+NORMAL → POWER_FAIL (after AC loss, 60s delay) → BATTERY_LOW → SHUTDOWN_IMMINENT
 ```
 
-### Schwellwerte (konfigurierbar über Web UI)
+### Thresholds (configurable via Web UI)
 
-| Parameter | Default | Beschreibung |
+| Parameter | Default | Description |
 |-----------|---------|-------------|
-| Power-Failure Verzögerung | 60 s | Zeit bevor Power-Failure-Event gefeuert wird |
-| Battery-Low Laufzeit | 300 s | Runtime-Schwelle |
-| Battery-Low Kapazität | 35 % | Kapazitäts-Schwelle |
+| Power Failure Delay | 60 s | Time before power failure event is fired |
+| Battery Low Runtime | 300 s | Runtime threshold |
+| Battery Low Capacity | 35 % | Capacity threshold |
 
-### HA Automation Beispiel
+### HA Automation Example
 
 ```yaml
-# Benachrichtigung bei Stromausfall
+# Notification on power failure
 automation:
-  - alias: "USV Stromausfall"
+  - alias: "UPS Power Failure"
     trigger:
       - platform: state
-        entity_id: text_sensor.cyberpower_ups_monitor_usv_status
-        to: "Stromausfall"
+        entity_id: text_sensor.cyberpower_ups_monitor_ups_status
+        to: "Power Failure"
     action:
       - service: notify.mobile_app
         data:
-          message: "Stromausfall! USV läuft auf Batterie."
+          message: "Power failure! UPS running on battery."
 
-  - alias: "USV Batterie niedrig - Shutdown"
+  - alias: "UPS Battery Low - Shutdown"
     trigger:
       - platform: state
-        entity_id: text_sensor.cyberpower_ups_monitor_usv_status
-        to: "Batterie niedrig"
+        entity_id: text_sensor.cyberpower_ups_monitor_ups_status
+        to: "Battery Low"
     action:
       - service: shell_command.shutdown_proxmox
 ```
 
 ## Web UI
 
-Erreichbar unter `http://<device-ip>/` — zeigt Live-Status aller USV-Werte und ermöglicht Konfiguration der Schwellwerte.
+Accessible at `http://<device-ip>/` — shows live status of all UPS values and allows configuration of thresholds.
 
-## Architektur
+## Architecture
 
 ```
-CyberPower USV
+CyberPower UPS
     │ USB HID (Power Device Class)
     ▼
 ESP32-S3 (USB Host)
-    │ GET_REPORT Control Transfers (alle 5s)
+    │ GET_REPORT Control Transfers (every 5s)
     ▼
 HID Report Parser → State Machine
     │
-    ├──→ ESPHome API → Home Assistant (Sensoren + Events)
-    └──→ Web UI (Port 80, Live-Status)
+    ├──→ ESPHome API → Home Assistant (Sensors + Events)
+    └──→ Web UI (Port 80, Live Status)
 ```
 
-## Lizenz
+## License
 
 MIT License

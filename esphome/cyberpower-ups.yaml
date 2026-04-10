@@ -57,7 +57,7 @@ cyberpower_ups:
 
 sensor:
   - platform: template
-    name: "Netzspannung"
+    name: "Utility Voltage"
     id: utility_voltage
     unit_of_measurement: "V"
     device_class: voltage
@@ -70,7 +70,7 @@ sensor:
     update_interval: 5s
 
   - platform: template
-    name: "Ausgangsspannung"
+    name: "Output Voltage"
     id: output_voltage
     unit_of_measurement: "V"
     device_class: voltage
@@ -83,7 +83,7 @@ sensor:
     update_interval: 5s
 
   - platform: template
-    name: "Batterieladung"
+    name: "Battery Capacity"
     id: battery_capacity
     unit_of_measurement: "%"
     device_class: battery
@@ -96,7 +96,7 @@ sensor:
     update_interval: 5s
 
   - platform: template
-    name: "Restlaufzeit"
+    name: "Remaining Runtime"
     id: remaining_runtime
     unit_of_measurement: "min"
     icon: "mdi:timer-outline"
@@ -109,7 +109,7 @@ sensor:
     update_interval: 5s
 
   - platform: template
-    name: "Last"
+    name: "Load"
     id: load_watt
     unit_of_measurement: "W"
     device_class: power
@@ -122,7 +122,7 @@ sensor:
     update_interval: 5s
 
   - platform: template
-    name: "Auslastung"
+    name: "Load Percent"
     id: load_percent
     unit_of_measurement: "%"
     icon: "mdi:gauge"
@@ -135,7 +135,7 @@ sensor:
     update_interval: 5s
 
   - platform: template
-    name: "Nennleistung"
+    name: "Rating Power"
     id: rating_power
     unit_of_measurement: "VA"
     icon: "mdi:flash"
@@ -148,7 +148,7 @@ sensor:
     update_interval: 60s
 
   - platform: template
-    name: "Nennspannung"
+    name: "Rating Voltage"
     id: rating_voltage
     unit_of_measurement: "V"
     device_class: voltage
@@ -164,7 +164,7 @@ sensor:
 
 binary_sensor:
   - platform: template
-    name: "USV verbunden"
+    name: "UPS Connected"
     id: ups_connected
     device_class: connectivity
     lambda: |-
@@ -172,7 +172,7 @@ binary_sensor:
     update_interval: 5s
 
   - platform: template
-    name: "Netz vorhanden"
+    name: "AC Present"
     id: ac_present
     device_class: power
     lambda: |-
@@ -180,7 +180,7 @@ binary_sensor:
     update_interval: 5s
 
   - platform: template
-    name: "Batteriebetrieb"
+    name: "On Battery"
     id: on_battery
     icon: "mdi:battery-alert"
     lambda: |-
@@ -188,7 +188,7 @@ binary_sensor:
     update_interval: 5s
 
   - platform: template
-    name: "Lädt"
+    name: "Charging"
     id: charging
     device_class: battery_charging
     lambda: |-
@@ -196,7 +196,7 @@ binary_sensor:
     update_interval: 5s
 
   - platform: template
-    name: "Überlast"
+    name: "Overload"
     id: overload
     device_class: problem
     lambda: |-
@@ -204,7 +204,7 @@ binary_sensor:
     update_interval: 5s
 
   - platform: template
-    name: "Batterie niedrig"
+    name: "Battery Low"
     id: battery_low
     device_class: battery
     lambda: |-
@@ -212,7 +212,7 @@ binary_sensor:
     update_interval: 5s
 
   - platform: template
-    name: "Batterie tauschen"
+    name: "Replace Battery"
     id: replace_battery
     device_class: problem
     lambda: |-
@@ -223,23 +223,23 @@ binary_sensor:
 
 text_sensor:
   - platform: template
-    name: "USV Status"
+    name: "UPS Status"
     id: ups_status
     icon: "mdi:power-plug"
     lambda: |-
       auto data = id(ups).get_data();
-      if (!data.connected) return std::string("Getrennt");
+      if (!data.connected) return std::string("Disconnected");
       switch (data.power_state) {
         case esphome::cyberpower_ups::PowerState::NORMAL: return std::string("Normal");
-        case esphome::cyberpower_ups::PowerState::POWER_FAIL_GRACE: return std::string("Stromausfall");
-        case esphome::cyberpower_ups::PowerState::BATTERY_LOW: return std::string("Batterie niedrig");
-        case esphome::cyberpower_ups::PowerState::SHUTDOWN_IMMINENT: return std::string("Shutdown!");
-        default: return std::string("Unbekannt");
+        case esphome::cyberpower_ups::PowerState::POWER_FAIL_GRACE: return std::string("Power Failure");
+        case esphome::cyberpower_ups::PowerState::BATTERY_LOW: return std::string("Battery Low");
+        case esphome::cyberpower_ups::PowerState::SHUTDOWN_IMMINENT: return std::string("Shutdown Imminent");
+        default: return std::string("Unknown");
       }
     update_interval: 5s
 
   - platform: template
-    name: "USV Modell"
+    name: "UPS Model"
     id: ups_model
     icon: "mdi:information"
     entity_category: diagnostic
@@ -249,7 +249,7 @@ text_sensor:
     update_interval: 60s
 
   - platform: template
-    name: "Letztes Ereignis"
+    name: "Last Power Event"
     id: last_power_event
     icon: "mdi:lightning-bolt"
     lambda: |-

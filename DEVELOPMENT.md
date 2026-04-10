@@ -1,147 +1,147 @@
-# ESP CyberPower UPS Monitor — Projektplanung
+# ESP CyberPower UPS Monitor — Project Plan
 
-## Ziel
+## Goal
 
-ESP32-S3 liest eine CyberPower BR1200ELCD USV direkt über USB HID aus und stellt
-alle Daten als native ESPHome-Sensoren in Home Assistant bereit — ohne NUT, ohne
-pwrstat, ohne SSH-Ketten. Die USV hängt per USB am ESP32 statt an einem Server.
+ESP32-S3 reads a CyberPower BR1200ELCD UPS directly via USB HID and exposes
+all data as native ESPHome sensors in Home Assistant — no NUT, no pwrstat,
+no SSH chains. The UPS connects via USB to the ESP32 instead of a server.
 
-**Vorher:**
+**Before:**
 ```
-USV → USB → Server (pwrstat) → SSH → Proxmox → mosquitto_pub → MQTT → HA
+UPS → USB → Server (pwrstat) → SSH → Proxmox → mosquitto_pub → MQTT → HA
 ```
 
-**Nachher:**
+**After:**
 ```
-USV → USB → ESP32-S3 → ESPHome API → Home Assistant
+UPS → USB → ESP32-S3 → ESPHome API → Home Assistant
 ```
 
 ## Hardware
 
-| Komponente | Details |
+| Component | Details |
 |-----------|---------|
-| USV | CyberPower BR1200ELCD, USB VID `0x0764`, PID `0x0501` |
-| MCU | ESP32-S3-DevKitC-1 (USB OTG auf GPIO19/20) |
-| Verbindung | USB-A Kabel von USV direkt an ESP32-S3 OTG Port |
-| Stromversorgung | ESP32 über separates USB-Netzteil (NICHT über die USV-USB!) |
+| UPS | CyberPower BR1200ELCD, USB VID `0x0764`, PID `0x0501` |
+| MCU | ESP32-S3-DevKitC-1 (USB OTG on GPIO19/20) |
+| Connection | USB-A cable from UPS directly to ESP32-S3 OTG Port |
+| Power Supply | ESP32 via separate USB power supply (NOT via the UPS USB!) |
 
-**Wichtig:** Der ESP32-S3 OTG Port liefert KEIN 5V VBUS. Die CyberPower USV
-versorgt ihren USB-Port selbst mit Strom, daher braucht man keinen powered Hub.
+**Important:** The ESP32-S3 OTG port does NOT provide 5V VBUS. The CyberPower UPS
+powers its USB port itself, so no powered hub is needed.
 
 ## USB HID Power Device Protocol
 
-CyberPower USVen verwenden den USB HID Power Device Class Standard:
+CyberPower UPS devices use the USB HID Power Device Class standard:
 
-- **Usage Page 0x84** (Power Device): Spannungen, Ströme, Last
-- **Usage Page 0x85** (Battery System): Kapazität, Laufzeit, Lade-/Entladestatus
+- **Usage Page 0x84** (Power Device): Voltages, currents, load
+- **Usage Page 0x85** (Battery System): Capacity, runtime, charge/discharge status
 
-Die Daten werden über **HID Feature Reports** gelesen (GET_REPORT Control Transfer).
-Einige Status-Flags kommen als **Input Reports** (Interrupt IN).
+Data is read via **HID Feature Reports** (GET_REPORT Control Transfer).
+Some status flags come as **Input Reports** (Interrupt IN).
 
-### Relevante HID Usages
+### Relevant HID Usages
 
-| Usage Page | Usage ID | Bedeutung | Einheit |
-|-----------|----------|-----------|---------|
-| 0x84 | 0x0030 | Input Voltage (Netzspannung) | V |
-| 0x84 | 0x0030 | Output Voltage (Ausgangsspannung) | V |
-| 0x84 | 0x0035 | Percent Load (Auslastung) | % |
-| 0x84 | 0x0040 | Config Voltage (Nennspannung) | V |
-| 0x84 | 0x0043 | Config Apparent Power (Nennleistung) | VA |
-| 0x85 | 0x0066 | Remaining Capacity (Batterieladung) | % |
-| 0x85 | 0x0068 | Runtime To Empty (Restlaufzeit) | s |
-| 0x85 | 0x0044 | Charging (lädt) | bool |
-| 0x85 | 0x0045 | Discharging (entlädt = Netzbetrieb aus) | bool |
-| 0x85 | 0x00D0 | AC Present (Netz vorhanden) | bool |
+| Usage Page | Usage ID | Meaning | Unit |
+|-----------|----------|---------|------|
+| 0x84 | 0x0030 | Input Voltage (Utility Voltage) | V |
+| 0x84 | 0x0030 | Output Voltage | V |
+| 0x84 | 0x0035 | Percent Load | % |
+| 0x84 | 0x0040 | Config Voltage (Rating Voltage) | V |
+| 0x84 | 0x0043 | Config Apparent Power (Rating Power) | VA |
+| 0x85 | 0x0066 | Remaining Capacity (Battery Capacity) | % |
+| 0x85 | 0x0068 | Runtime To Empty (Remaining Runtime) | s |
+| 0x85 | 0x0044 | Charging | bool |
+| 0x85 | 0x0045 | Discharging (on battery) | bool |
+| 0x85 | 0x00D0 | AC Present | bool |
 | 0x85 | 0x0042 | Below Remaining Capacity Limit | bool |
 | 0x85 | 0x00D3 | Shutdown Imminent | bool |
 | 0x85 | 0x0065 | Overload | bool |
 | 0x85 | 0x006B | Need Replacement | bool |
 
-### Kommunikationsablauf
+### Communication Flow
 
-1. ESP32 enumeriert USB-Gerät, liest Device Descriptor (VID/PID prüfen)
-2. HID Report Descriptor lesen und parsen → Feld-Map aufbauen
-3. Zyklisch (alle 5s) Feature Reports lesen via `GET_REPORT` Control Transfer
-4. Werte extrahieren, in ESPHome-Sensoren publizieren
-5. Status-Änderungen (Stromausfall etc.) sofort erkennen und Events feuern
+1. ESP32 enumerates USB device, reads Device Descriptor (verify VID/PID)
+2. Read and parse HID Report Descriptor → build field map
+3. Cyclically (every 5s) read Feature Reports via `GET_REPORT` Control Transfer
+4. Extract values, publish to ESPHome sensors
+5. Detect status changes (power failure etc.) immediately and fire events
 
 ## ESPHome Entities
 
-### Sensoren (sensor)
+### Sensors (sensor)
 
-| Entity ID | Name | Einheit | device_class | Quelle |
-|-----------|------|---------|-------------|--------|
-| `utility_voltage` | Netzspannung | V | voltage | HID Input/Voltage |
-| `output_voltage` | Ausgangsspannung | V | voltage | HID Output/Voltage |
-| `battery_capacity` | Batterieladung | % | battery | HID RemainingCapacity |
-| `remaining_runtime` | Restlaufzeit | min | duration | HID RuntimeToEmpty |
-| `load_watt` | Last | W | power | Berechnet aus % × Nennleistung |
-| `load_percent` | Auslastung | % | power_factor | HID PercentLoad |
-| `rating_voltage` | Nennspannung | V | voltage | HID ConfigVoltage |
-| `rating_power` | Nennleistung | VA | apparent_power | HID ConfigApparentPower |
+| Entity ID | Name | Unit | device_class | Source |
+|-----------|------|------|-------------|--------|
+| `utility_voltage` | Utility Voltage | V | voltage | HID Input/Voltage |
+| `output_voltage` | Output Voltage | V | voltage | HID Output/Voltage |
+| `battery_capacity` | Battery Capacity | % | battery | HID RemainingCapacity |
+| `remaining_runtime` | Remaining Runtime | min | duration | HID RuntimeToEmpty |
+| `load_watt` | Load | W | power | Calculated from % x Rating Power |
+| `load_percent` | Load Percent | % | power_factor | HID PercentLoad |
+| `rating_voltage` | Rating Voltage | V | voltage | HID ConfigVoltage |
+| `rating_power` | Rating Power | VA | apparent_power | HID ConfigApparentPower |
 
-### Binary Sensoren (binary_sensor)
+### Binary Sensors (binary_sensor)
 
-| Entity ID | Name | device_class | Quelle |
+| Entity ID | Name | device_class | Source |
 |-----------|------|-------------|--------|
-| `ac_present` | Netz vorhanden | power | HID ACPresent |
-| `on_battery` | Batteriebetrieb | — | HID Discharging |
-| `charging` | Lädt | battery_charging | HID Charging |
-| `overload` | Überlast | problem | HID Overload |
-| `battery_low` | Batterie niedrig | battery | HID BelowRemainingCap |
-| `replace_battery` | Batterie tauschen | problem | HID NeedReplacement |
-| `ups_connected` | USV verbunden | connectivity | USB Device Present |
+| `ac_present` | AC Present | power | HID ACPresent |
+| `on_battery` | On Battery | — | HID Discharging |
+| `charging` | Charging | battery_charging | HID Charging |
+| `overload` | Overload | problem | HID Overload |
+| `battery_low` | Battery Low | battery | HID BelowRemainingCap |
+| `replace_battery` | Replace Battery | problem | HID NeedReplacement |
+| `ups_connected` | UPS Connected | connectivity | USB Device Present |
 
-### Text Sensoren (text_sensor)
+### Text Sensors (text_sensor)
 
-| Entity ID | Name | Quelle |
+| Entity ID | Name | Source |
 |-----------|------|--------|
-| `ups_status` | USV Status | Zusammenfassung: "Normal", "On Battery", "Battery Low", etc. |
-| `ups_model` | Modell | USB iProduct String |
-| `last_power_event` | Letztes Ereignis | Intern getrackt |
+| `ups_status` | UPS Status | Summary: "Normal", "On Battery", "Battery Low", etc. |
+| `ups_model` | Model | USB iProduct String |
+| `last_power_event` | Last Power Event | Tracked internally |
 
-## Stromausfall-Logik (State Machine)
+## Power Failure Logic (State Machine)
 
-Repliziert die pwrstat-Daemon Konfiguration als ESPHome-Events, die in HA
-Automationen genutzt werden können.
+Replicates the pwrstat daemon configuration as ESPHome events that can be
+used in HA automations.
 
 ### States
 
 ```
 ┌─────────────┐
-│   NORMAL     │  AC Present, nicht entladen
+│   NORMAL     │  AC Present, not discharging
 └──────┬──────┘
        │ AC Lost (Discharging = true)
        ▼
 ┌─────────────┐
-│ POWER_FAIL   │  Timer: 60s Verzögerung
-│ (grace)      │  → nach 60s: Event "power_failure" feuern
+│ POWER_FAIL   │  Timer: 60s delay
+│ (grace)      │  → after 60s: fire "power_failure" event
 └──────┬──────┘
-       │ Runtime < 300s ODER Capacity < 35%
+       │ Runtime < 300s OR Capacity < 35%
        ▼
 ┌─────────────┐
-│ BATTERY_LOW  │  Event "battery_low" feuern
-│              │  → HA Automation: Shutdown VMs, dann Host
+│ BATTERY_LOW  │  Fire "battery_low" event
+│              │  → HA Automation: Shutdown VMs, then host
 └──────┬──────┘
-       │ Shutdown Imminent (USV meldet)
+       │ Shutdown Imminent (UPS reports)
        ▼
 ┌─────────────┐
-│ SHUTDOWN     │  Event "shutdown_imminent" feuern
-│ IMMINENT     │  Letzte Warnung
+│ SHUTDOWN     │  Fire "shutdown_imminent" event
+│ IMMINENT     │  Final warning
 └─────────────┘
 
-Jeder State → NORMAL wenn AC zurückkehrt
+Each state → NORMAL when AC returns
 ```
 
-### Konfigurierbare Parameter (über Web UI)
+### Configurable Parameters (via Web UI)
 
-| Parameter | Default | Beschreibung |
+| Parameter | Default | Description |
 |-----------|---------|-------------|
-| `power_fail_delay` | 60 s | Verzögerung bevor Power-Failure-Event gefeuert wird |
-| `battery_low_runtime` | 300 s | Runtime-Schwelle für Battery-Low |
-| `battery_low_capacity` | 35 % | Kapazitäts-Schwelle für Battery-Low |
+| `power_fail_delay` | 60 s | Delay before power failure event is fired |
+| `battery_low_runtime` | 300 s | Runtime threshold for battery low |
+| `battery_low_capacity` | 35 % | Capacity threshold for battery low |
 
-### ESPHome Events für HA Automationen
+### ESPHome Events for HA Automations
 
 ```yaml
 # In HA Automation:
@@ -154,7 +154,7 @@ trigger:
 action:
   - service: notify.mobile_app
     data:
-      message: "Stromausfall! USV läuft auf Batterie seit 60s"
+      message: "Power failure! UPS running on battery for 60s"
       
 ---
 trigger:
@@ -168,71 +168,71 @@ action:
     data: {}
 ```
 
-## Architektur / Code-Struktur
+## Architecture / Code Structure
 
 ```
-esp-cyberpower-mqtt/
+esp-cyberpower-ups/
 ├── components/
 │   └── cyberpower_ups/
-│       ├── __init__.py              ESPHome Component-Definition
-│       ├── cyberpower_ups.h         Hauptkomponente (USB Host, Sensoren, Events)
-│       ├── hid_ups_protocol.h       HID Report Descriptor Parser
-│       └── web_ui.h                 Status-Webseite & Konfiguration
+│       ├── __init__.py              ESPHome component definition
+│       ├── cyberpower_ups.h         Main component (USB host, sensors, events)
+│       ├── hid_ups_protocol.h       HID Report Descriptor parser
+│       └── web_ui.h                 Status web page & configuration
 ├── esphome/
-│   └── cyberpower-ups.yaml          Beispiel ESPHome Config
-├── DEVELOPMENT.md                   Diese Datei
-├── README.md                        Benutzer-Doku
+│   └── cyberpower-ups.yaml          Example ESPHome config
+├── DEVELOPMENT.md                   This file
+├── README.md                        User documentation
 ├── LICENSE
 └── .gitignore
 ```
 
 ### FreeRTOS Tasks
 
-| Task | Core | Prio | Aufgabe |
+| Task | Core | Prio | Purpose |
 |------|------|------|---------|
 | `usb_lib` | 0 | 10 | USB Host Library Event Loop |
 | `usb_mon` | 1 | 5 | Device Connect/Disconnect, Enumeration |
-| `ups_poll` | 1 | 6 | Zyklisches Lesen der HID Reports (alle 5s) |
+| `ups_poll` | 1 | 6 | Cyclic reading of HID Reports (every 5s) |
 
-### Datenfluss
+### Data Flow
 
 ```
 USB HID Reports
-    ↓ GET_REPORT (Control Transfer, alle 5s)
+    ↓ GET_REPORT (Control Transfer, every 5s)
 HID Report Parser (hid_ups_protocol.h)
-    ↓ Extrahierte Werte
+    ↓ Extracted values
 UPS State Machine (cyberpower_ups.h)
     ↓ Sensor Updates + Events
 ESPHome API → Home Assistant
     ↓
-HA Automationen (Benachrichtigungen, Shutdown-Skripte)
+HA Automations (Notifications, Shutdown scripts)
 ```
 
-## Offene Fragen / Risiken
+## Open Questions / Risks
 
-1. **VID/PID Verifizierung**: Der PID `0x0501` muss am realen Gerät bestätigt werden.
-   → Kann mit `lsusb` auf einem Linux-Rechner geprüft werden, wenn die USV dort angeschlossen ist.
+1. **VID/PID Verification**: The PID `0x0501` must be confirmed on real hardware.
+   → Can be checked with `lsusb` on a Linux machine when the UPS is connected there.
 
-2. **VBUS**: Die CyberPower USV sollte ihren USB-Port selbst mit Strom versorgen.
-   Falls nicht, braucht man einen powered Hub (wie beim USB-Gateway Projekt).
+2. **VBUS**: The CyberPower UPS should power its USB port itself.
+   If not, a powered hub is needed (as in the USB gateway project).
 
-3. **HID Report Format**: CyberPower folgt dem Standard weitgehend, aber manche
-   Hersteller haben Quirks. Erster Test wird zeigen ob der Parser alle Werte findet.
+3. **HID Report Format**: CyberPower largely follows the standard, but some
+   manufacturers have quirks. First test will show whether the parser finds all values.
 
-4. **ESP32-S3 OTG + HID**: ESP-IDF hat keinen fertigen USB HID Host Treiber als
-   High-Level-Komponente. Wir nutzen die Low-Level USB Host Library direkt und
-   implementieren HID GET_REPORT über Control Transfers. Das ist robuster als
-   der experimentelle `usb_host_hid` Treiber.
+4. **ESP32-S3 OTG + HID**: ESP-IDF has no ready-made USB HID Host driver as a
+   high-level component. We use the low-level USB Host Library directly and
+   implement HID GET_REPORT via Control Transfers. This is more robust than
+   the experimental `usb_host_hid` driver.
 
-## Nächste Schritte
+## Next Steps
 
-1. [x] Projektstruktur anlegen
-2. [x] HID Report Descriptor Parser implementieren
-3. [ ] Hauptkomponente: USB Host + HID Communication
-4. [ ] ESPHome Sensor-Entities definieren und publishen
-5. [ ] State Machine für Stromausfall-Logik
-6. [ ] Web UI für Live-Status
-7. [ ] ESPHome YAML Beispiel-Config
-8. [ ] README schreiben
-9. [ ] Git Repo erstellen und pushen
-10. [ ] Realer Hardware-Test mit BR1200ELCD
+1. [x] Set up project structure
+2. [x] Implement HID Report Descriptor parser
+3. [ ] Main component: USB Host + HID Communication
+4. [ ] Define and publish ESPHome sensor entities
+5. [ ] State machine for power failure logic
+6. [ ] Web UI for live status
+7. [ ] Example ESPHome YAML config
+8. [ ] Write README
+9. [ ] Create and push Git repo
+10. [ ] Real hardware test with BR1200ELCD
