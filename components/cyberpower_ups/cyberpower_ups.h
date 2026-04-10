@@ -516,12 +516,24 @@ class CyberpowerUpsComponent : public Component {
 
     ctrl_xfer_->num_bytes = sizeof(usb_setup_packet_t) + wLength;
 
-    // Submit and wait
+    // Submit and pump client events while waiting for completion.
+    // The callback is delivered via usb_host_client_handle_events(),
+    // so we must keep calling it or the callback never fires (deadlock).
     xSemaphoreTake(ctrl_sem_, 0);  // Clear semaphore
     esp_err_t err = usb_host_transfer_submit_control(client_hdl_, ctrl_xfer_);
     if (err != ESP_OK) return err;
 
-    if (xSemaphoreTake(ctrl_sem_, pdMS_TO_TICKS(5000)) != pdTRUE) {
+    bool got_it = false;
+    TickType_t start = xTaskGetTickCount();
+    while ((xTaskGetTickCount() - start) < pdMS_TO_TICKS(5000)) {
+      if (xSemaphoreTake(ctrl_sem_, 0) == pdTRUE) {
+        got_it = true;
+        break;
+      }
+      usb_host_client_handle_events(client_hdl_, pdMS_TO_TICKS(50));
+    }
+
+    if (!got_it) {
       ESP_LOGE(TAG, "Control transfer timeout");
       return ESP_ERR_TIMEOUT;
     }
