@@ -143,6 +143,7 @@ class CyberpowerUpsComponent : public Component {
   // ── Public accessors for Web UI ───────────────────────────
   UpsData get_data() {
     UpsData snapshot;
+    if (!data_mutex_) return snapshot;  // Not yet initialized
     xSemaphoreTake(data_mutex_, portMAX_DELAY);
     snapshot = data_;
     xSemaphoreGive(data_mutex_);
