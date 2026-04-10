@@ -22,8 +22,10 @@
 #include "usb/usb_host.h"
 
 #include "esp_system.h"
-#include "esp_event.h"
 #include "esp_timer.h"
+#include "nvs_flash.h"
+#include "nvs.h"
+#include "esp_partition.h"
 
 #include <atomic>
 #include <cstring>
