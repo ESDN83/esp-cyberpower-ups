@@ -175,7 +175,7 @@ class CyberpowerUpsComponent : public Component {
   bool device_open_ = false;
 
   // Control transfer buffer
-  static constexpr size_t CTRL_BUF_SIZE = 512;
+  static constexpr size_t CTRL_BUF_SIZE = 1024;
   usb_transfer_t *ctrl_xfer_ = nullptr;
 
   // Configurable thresholds (stored in NVS)
@@ -521,7 +521,7 @@ class CyberpowerUpsComponent : public Component {
     esp_err_t err = usb_host_transfer_submit_control(client_hdl_, ctrl_xfer_);
     if (err != ESP_OK) return err;
 
-    if (xSemaphoreTake(ctrl_sem_, pdMS_TO_TICKS(2000)) != pdTRUE) {
+    if (xSemaphoreTake(ctrl_sem_, pdMS_TO_TICKS(5000)) != pdTRUE) {
       ESP_LOGE(TAG, "Control transfer timeout");
       return ESP_ERR_TIMEOUT;
     }
