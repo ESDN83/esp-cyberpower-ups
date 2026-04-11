@@ -419,6 +419,17 @@ class CyberpowerUpsComponent : public Component {
 
     xSemaphoreTake(data_mutex_, portMAX_DELAY);
     data_.connected = true;
+
+    // Extract VA rating from model name (e.g. "BR1200ELCD" → 1200)
+    // CyberPower naming: BR/CP/PR + digits (VA rating) + suffix
+    if (data_.rating_power_va <= 0) {
+      const char *p = data_.model;
+      while (*p && !(*p >= '0' && *p <= '9')) p++;  // skip letters
+      if (*p) {
+        data_.rating_power_va = (float)atoi(p);
+        ESP_LOGI(TAG, "Rating VA from model name: %.0f", data_.rating_power_va);
+      }
+    }
     xSemaphoreGive(data_mutex_);
 
     device_open_ = true;
@@ -721,16 +732,8 @@ class CyberpowerUpsComponent : public Component {
     if (f && read_field_value_(f, val)) {
       ESP_LOGD(TAG, "ConfigPower raw=%d exp=%d", val, f->unit_exponent);
       data_.rating_power_va = (float)val;
-    } else {
-      ESP_LOGW(TAG, "ConfigApparentPower %s (page=0x84 usage=0x43)",
-               f ? "read failed" : "NOT FOUND in descriptor");
-      // Try active power (0x0034) as fallback
-      f = report_map_.find(USAGE_PAGE_POWER_DEVICE, PD_USAGE_ACTIVE_POWER);
-      if (f && read_field_value_(f, val)) {
-        ESP_LOGD(TAG, "ActivePower (fallback) raw=%d exp=%d", val, f->unit_exponent);
-        data_.rating_power_va = (float)val;
-      }
     }
+    // rating_power_va may also come from model name (set during connect)
 
     // Output voltage — try to find a second voltage field in output collection
     // Many CyberPower UPS report output voltage same as input when on AC
