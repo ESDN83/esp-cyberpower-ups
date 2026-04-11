@@ -612,17 +612,7 @@ class CyberpowerUpsComponent : public Component {
       return false;
     }
 
-    // Log full descriptor in chunks for offline analysis
-    ESP_LOGI(TAG, "HID Report Desc [%d bytes]:", (int)desc_len);
-    char hex[128];
-    for (size_t off = 0; off < desc_len; off += 32) {
-      size_t chunk = (desc_len - off > 32) ? 32 : desc_len - off;
-      for (size_t i = 0; i < chunk; i++) {
-        snprintf(hex + i * 3, 4, "%02X ", desc_buf[off + i]);
-      }
-      hex[chunk * 3] = '\0';
-      ESP_LOGI(TAG, "  @%03d: %s", (int)off, hex);
-    }
+    ESP_LOGI(TAG, "HID Report Desc: %d bytes", (int)desc_len);
 
     // Parse
     report_map_ = {};
@@ -630,13 +620,7 @@ class CyberpowerUpsComponent : public Component {
     free(desc_buf);
 
     if (ok) {
-      // Log ALL found fields (at INFO level so they're always visible)
-      for (size_t i = 0; i < report_map_.fields.size(); i++) {
-        auto &f = report_map_.fields[i];
-        ESP_LOGI(TAG, "  [%02d] page=0x%04X usage=0x%04X rid=%d type=%d exp=%d bits=%d@%d",
-                 (int)i, f.usage_page, f.usage, f.report_id, (int)f.report_type,
-                 f.unit_exponent, f.bit_size, f.bit_offset);
-      }
+      ESP_LOGI(TAG, "Parsed %d HID fields", (int)report_map_.fields.size());
     }
 
     return ok;
@@ -697,8 +681,7 @@ class CyberpowerUpsComponent : public Component {
     // Input (utility) voltage — Page 0x84, within Input collection
     auto *f = report_map_.find(USAGE_PAGE_POWER_DEVICE, PD_USAGE_VOLTAGE);
     if (f && read_field_value_(f, val)) {
-      ESP_LOGD(TAG, "Voltage raw=%d exp=%d", val, f->unit_exponent);
-      data_.utility_voltage = (float)val;  // CyberPower reports whole volts
+      data_.utility_voltage = (float)val;
     }
 
     // Battery capacity
@@ -710,8 +693,7 @@ class CyberpowerUpsComponent : public Component {
     // Runtime to empty (seconds)
     f = report_map_.find(USAGE_PAGE_BATTERY, BAT_USAGE_RUNTIME_TO_EMPTY);
     if (f && read_field_value_(f, val)) {
-      ESP_LOGD(TAG, "Runtime raw=%d exp=%d", val, f->unit_exponent);
-      data_.remaining_runtime_sec = (float)val;  // CyberPower reports whole seconds
+      data_.remaining_runtime_sec = (float)val;
     }
 
     // Percent load
@@ -723,14 +705,12 @@ class CyberpowerUpsComponent : public Component {
     // Config voltage (rating)
     f = report_map_.find(USAGE_PAGE_POWER_DEVICE, PD_USAGE_CONFIG_VOLTAGE);
     if (f && read_field_value_(f, val)) {
-      ESP_LOGD(TAG, "ConfigVoltage raw=%d exp=%d", val, f->unit_exponent);
       data_.rating_voltage = (float)val;
     }
 
     // Config apparent power (rating VA)
     f = report_map_.find(USAGE_PAGE_POWER_DEVICE, PD_USAGE_CONFIG_APPARENT_POWER);
     if (f && read_field_value_(f, val)) {
-      ESP_LOGD(TAG, "ConfigPower raw=%d exp=%d", val, f->unit_exponent);
       data_.rating_power_va = (float)val;
     }
     // rating_power_va may also come from model name (set during connect)
@@ -744,21 +724,16 @@ class CyberpowerUpsComponent : public Component {
 
     f = report_map_.find(USAGE_PAGE_BATTERY, BAT_USAGE_AC_PRESENT);
     if (f && read_field_value_(f, val)) {
-      ESP_LOGD(TAG, "ACPresent rid=%d raw=%d bits=%d@%d", f->report_id, val, f->bit_size, f->bit_offset);
       data_.ac_present = (val != 0);
-    } else {
-      ESP_LOGW(TAG, "ACPresent field %s", f ? "read failed" : "NOT FOUND");
     }
 
     f = report_map_.find(USAGE_PAGE_BATTERY, BAT_USAGE_DISCHARGING);
     if (f && read_field_value_(f, val)) {
-      ESP_LOGD(TAG, "Discharging rid=%d raw=%d", f->report_id, val);
       data_.on_battery = (val != 0);
     }
 
     f = report_map_.find(USAGE_PAGE_BATTERY, BAT_USAGE_CHARGING);
     if (f && read_field_value_(f, val)) {
-      ESP_LOGD(TAG, "Charging rid=%d raw=%d", f->report_id, val);
       data_.charging = (val != 0);
     }
 

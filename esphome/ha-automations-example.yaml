@@ -1,0 +1,160 @@
+# ══════════════════════════════════════════════════════════════
+# Home Assistant Automations for CyberPower UPS Power Management
+# ══════════════════════════════════════════════════════════════
+#
+# Copy these into your HA automations.yaml or create via the HA UI.
+# Adjust entity IDs to match your ESPHome device name.
+#
+# Replaces the old pwrstat + MQTT approach:
+#   Before: UPS -> pwrstat -> mosquitto_pub -> MQTT -> HA
+#   After:  UPS -> ESP32-S3 -> ESPHome API -> HA (direct)
+#
+# Required HA shell_commands (add to configuration.yaml):
+#
+#   shell_command:
+#     proxmox_shutdown_vms: >-
+#       ssh root@PROXMOX_IP 'for vmid in $(qm list | awk "NR>1 {print \$1}"); do qm shutdown $vmid; done'
+#     proxmox_shutdown_cts: >-
+#       ssh root@PROXMOX_IP 'for ctid in $(pct list | awk "NR>1 {print \$1}"); do pct shutdown $ctid; done'
+#     proxmox_shutdown_host: >-
+#       ssh root@PROXMOX_IP 'shutdown -h now'
+#     ha_shutdown: >-
+#       ha host shutdown
+#
+# ──────────────────────────────────────────────────────────────
+
+# ── 1. Power Failure Alert ────────────────────────────────────
+# Fires when grace period expires (default 60s after AC loss).
+# Sends a persistent notification that stays visible until dismissed.
+
+- alias: "UPS: Power Failure Alert"
+  id: ups_power_failure_alert
+  trigger:
+    - platform: state
+      entity_id: text_sensor.cyberpower_ups_monitor_ups_status
+      to: "Power Failure"
+  action:
+    - service: persistent_notification.create
+      data:
+        title: "UPS Power Failure"
+        message: >-
+          Power failure detected on {{ state_attr('text_sensor.cyberpower_ups_monitor_ups_model', 'value') | default('CyberPower UPS') }}.
+          Battery: {{ states('sensor.cyberpower_ups_monitor_battery_capacity') }}%,
+          Runtime: {{ states('sensor.cyberpower_ups_monitor_remaining_runtime') }} min,
+          Load: {{ states('sensor.cyberpower_ups_monitor_load') }} W
+        notification_id: ups_power_failure
+
+# ── 2. Battery Low Alert ─────────────────────────────────────
+# Fires when battery runtime or capacity drops below thresholds.
+
+- alias: "UPS: Battery Low Alert"
+  id: ups_battery_low_alert
+  trigger:
+    - platform: state
+      entity_id: text_sensor.cyberpower_ups_monitor_ups_status
+      to: "Battery Low"
+  action:
+    - service: persistent_notification.create
+      data:
+        title: "UPS Battery Low - Shutdown Starting"
+        message: >-
+          Battery low! Starting shutdown sequence.
+          Battery: {{ states('sensor.cyberpower_ups_monitor_battery_capacity') }}%,
+          Runtime: {{ states('sensor.cyberpower_ups_monitor_remaining_runtime') }} min
+        notification_id: ups_battery_low
+
+# ── 3. AC Restored Alert ─────────────────────────────────────
+# Clears power failure notifications when AC returns.
+
+- alias: "UPS: AC Restored Alert"
+  id: ups_ac_restored_alert
+  trigger:
+    - platform: state
+      entity_id: text_sensor.cyberpower_ups_monitor_ups_status
+      to: "Normal"
+  condition:
+    - condition: state
+      entity_id: text_sensor.cyberpower_ups_monitor_last_power_event
+      state: "AC Restored"
+  action:
+    - service: persistent_notification.create
+      data:
+        title: "UPS AC Restored"
+        message: "AC power restored. UPS back to normal operation."
+        notification_id: ups_ac_restored
+    - service: persistent_notification.dismiss
+      data:
+        notification_id: ups_power_failure
+    - service: persistent_notification.dismiss
+      data:
+        notification_id: ups_battery_low
+
+# ── 4. Proxmox Shutdown Sequence ─────────────────────────────
+# Triggered when battery is low. Shuts down in order:
+#   1. VMs (graceful shutdown)
+#   2. Containers
+#   3. Proxmox host
+#   4. HA / NUC (last!)
+#
+# Adjust delays based on how long your VMs/CTs take to shut down.
+
+- alias: "UPS: Proxmox Shutdown Sequence"
+  id: ups_proxmox_shutdown
+  trigger:
+    - platform: state
+      entity_id: text_sensor.cyberpower_ups_monitor_ups_status
+      to: "Battery Low"
+  action:
+    # Step 1: Shut down VMs
+    - service: persistent_notification.create
+      data:
+        title: "UPS Shutdown"
+        message: "Shutting down Proxmox VMs..."
+        notification_id: ups_shutdown_progress
+    - service: shell_command.proxmox_shutdown_vms
+    - delay: "00:01:00"
+
+    # Step 2: Shut down containers
+    - service: persistent_notification.create
+      data:
+        title: "UPS Shutdown"
+        message: "Shutting down Proxmox containers..."
+        notification_id: ups_shutdown_progress
+    - service: shell_command.proxmox_shutdown_cts
+    - delay: "00:00:30"
+
+    # Step 3: Shut down Proxmox host
+    - service: persistent_notification.create
+      data:
+        title: "UPS Shutdown"
+        message: "Shutting down Proxmox host..."
+        notification_id: ups_shutdown_progress
+    - service: shell_command.proxmox_shutdown_host
+    - delay: "00:00:15"
+
+    # Step 4: Shut down HA / NUC (LAST!)
+    - service: persistent_notification.create
+      data:
+        title: "UPS Shutdown"
+        message: "Shutting down Home Assistant..."
+        notification_id: ups_shutdown_progress
+    - service: shell_command.ha_shutdown
+
+# ── 5. Shutdown Imminent Alert ────────────────────────────────
+# Last resort: UPS hardware reports imminent shutdown.
+# Force immediate HA shutdown if still running.
+
+- alias: "UPS: Shutdown Imminent"
+  id: ups_shutdown_imminent
+  trigger:
+    - platform: state
+      entity_id: text_sensor.cyberpower_ups_monitor_ups_status
+      to: "Shutdown Imminent"
+  action:
+    - service: persistent_notification.create
+      data:
+        title: "UPS SHUTDOWN IMMINENT"
+        message: "UPS battery critical - forcing immediate shutdown!"
+        notification_id: ups_shutdown_imminent
+    - delay: "00:00:05"
+    - service: shell_command.ha_shutdown

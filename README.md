@@ -84,29 +84,42 @@ NORMAL → POWER_FAIL (after AC loss, 60s delay) → BATTERY_LOW → SHUTDOWN_IM
 | Battery Low Runtime | 300 s | Runtime threshold |
 | Battery Low Capacity | 35 % | Capacity threshold |
 
-### HA Automation Example
+### HA Automation Examples
+
+See `esphome/ha-automations-example.yaml` for a complete set of automations including:
+
+- **Power Failure Alert** — persistent notification when AC is lost
+- **Battery Low Alert** — notification when battery thresholds are breached
+- **AC Restored** — clears alerts when power returns
+- **Proxmox Shutdown Sequence** — graceful shutdown: VMs → Containers → Host → HA (last!)
+- **Shutdown Imminent** — emergency HA shutdown on UPS hardware signal
+
+Quick example:
 
 ```yaml
-# Notification on power failure
 automation:
-  - alias: "UPS Power Failure"
+  - alias: "UPS: Power Failure Alert"
     trigger:
       - platform: state
         entity_id: text_sensor.cyberpower_ups_monitor_ups_status
         to: "Power Failure"
     action:
-      - service: notify.mobile_app
+      - service: persistent_notification.create
         data:
-          message: "Power failure! UPS running on battery."
-
-  - alias: "UPS Battery Low - Shutdown"
-    trigger:
-      - platform: state
-        entity_id: text_sensor.cyberpower_ups_monitor_ups_status
-        to: "Battery Low"
-    action:
-      - service: shell_command.shutdown_proxmox
+          title: "UPS Power Failure"
+          message: "Power failure! Battery: {{ states('sensor.cyberpower_ups_monitor_battery_capacity') }}%"
+          notification_id: ups_power_failure
 ```
+
+### Migrating from pwrstat / MQTT
+
+If you previously used the `pwrstat` daemon with MQTT (e.g. `sensor.usv_proxmox*` entities):
+
+1. Set up this ESPHome device and verify all sensors appear in HA
+2. Update your automations to use the new entity IDs (`text_sensor.cyberpower_ups_monitor_*`, `sensor.cyberpower_ups_monitor_*`)
+3. Remove the old MQTT entities: **Settings → Devices → search "usv_proxmox" → Delete**
+4. Remove the pwrstat cron job / systemd service on the old server
+5. Disconnect the USB cable from the server and connect it to the ESP32-S3
 
 ## Web UI
 
