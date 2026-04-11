@@ -12,6 +12,11 @@ ESP32-S3 reads a CyberPower UPS directly via USB HID and exposes all data as nat
 - HA events for automations (Power Failure, Battery Low, Shutdown Imminent)
 - Web UI for live status and configuration
 - No separate server or daemon required
+- 
+<img width="1510" height="1525" alt="grafik" src="https://github.com/user-attachments/assets/cacf1d3a-af55-4aa8-9f09-44d434832d96" />
+
+<img width="1549" height="1474" alt="grafik" src="https://github.com/user-attachments/assets/9595da39-6d2c-44f6-a424-a16bfc9305e2" />
+
 
 ## Hardware
 
