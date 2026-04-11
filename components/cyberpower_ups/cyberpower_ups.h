@@ -650,7 +650,7 @@ class CyberpowerUpsComponent : public Component {
   bool read_field_value_(const HidField *field, int32_t &value) {
     if (!field) return false;
 
-    // Calculate report size (max bit offset + size in this report)
+    // Calculate report data size (max bit offset + size in this report)
     size_t report_bytes = 0;
     for (auto &f : report_map_.fields) {
       if (f.report_id == field->report_id && f.report_type == field->report_type) {
@@ -659,17 +659,17 @@ class CyberpowerUpsComponent : public Component {
       }
     }
     if (report_bytes == 0) report_bytes = 8;
-    if (report_bytes > 64) report_bytes = 64;
+
+    // GET_REPORT response includes report ID as first byte, so request +1
+    size_t xfer_bytes = report_bytes + 1;
+    if (xfer_bytes > 63) xfer_bytes = 63;
 
     uint8_t report_buf[64] = {};
-    if (!read_hid_report_(field->report_id, field->report_type, report_buf, report_bytes))
+    if (!read_hid_report_(field->report_id, field->report_type, report_buf, xfer_bytes))
       return false;
 
-    // First byte might be the report ID — check and skip if needed
-    uint8_t *data = report_buf;
-    if (report_buf[0] == field->report_id) {
-      data = report_buf + 1;  // Skip report ID
-    }
+    // GET_REPORT always prepends the report ID byte — skip it
+    uint8_t *data = report_buf + 1;
 
     value = extract_field_value(data, *field);
     return true;
