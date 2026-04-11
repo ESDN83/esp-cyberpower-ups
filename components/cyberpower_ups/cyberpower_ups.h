@@ -721,6 +721,15 @@ class CyberpowerUpsComponent : public Component {
     if (f && read_field_value_(f, val)) {
       ESP_LOGD(TAG, "ConfigPower raw=%d exp=%d", val, f->unit_exponent);
       data_.rating_power_va = (float)val;
+    } else {
+      ESP_LOGW(TAG, "ConfigApparentPower %s (page=0x84 usage=0x43)",
+               f ? "read failed" : "NOT FOUND in descriptor");
+      // Try active power (0x0034) as fallback
+      f = report_map_.find(USAGE_PAGE_POWER_DEVICE, PD_USAGE_ACTIVE_POWER);
+      if (f && read_field_value_(f, val)) {
+        ESP_LOGD(TAG, "ActivePower (fallback) raw=%d exp=%d", val, f->unit_exponent);
+        data_.rating_power_va = (float)val;
+      }
     }
 
     // Output voltage — try to find a second voltage field in output collection
