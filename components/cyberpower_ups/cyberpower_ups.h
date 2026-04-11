@@ -601,13 +601,17 @@ class CyberpowerUpsComponent : public Component {
       return false;
     }
 
-    // Log first bytes for debugging
-    char hex[128] = {};
-    size_t hex_len = (desc_len > 40) ? 40 : desc_len;
-    for (size_t i = 0; i < hex_len; i++) {
-      snprintf(hex + i * 3, 4, "%02X ", desc_buf[i]);
+    // Log full descriptor in chunks for offline analysis
+    ESP_LOGI(TAG, "HID Report Desc [%d bytes]:", (int)desc_len);
+    char hex[128];
+    for (size_t off = 0; off < desc_len; off += 32) {
+      size_t chunk = (desc_len - off > 32) ? 32 : desc_len - off;
+      for (size_t i = 0; i < chunk; i++) {
+        snprintf(hex + i * 3, 4, "%02X ", desc_buf[off + i]);
+      }
+      hex[chunk * 3] = '\0';
+      ESP_LOGI(TAG, "  @%03d: %s", (int)off, hex);
     }
-    ESP_LOGI(TAG, "HID Report Desc [%d bytes]: %s...", (int)desc_len, hex);
 
     // Parse
     report_map_ = {};
@@ -615,10 +619,12 @@ class CyberpowerUpsComponent : public Component {
     free(desc_buf);
 
     if (ok) {
-      // Log found fields
-      for (auto &f : report_map_.fields) {
-        ESP_LOGD(TAG, "  Field: page=0x%04X usage=0x%04X report_id=%d type=%d bits=%d@%d",
-                 f.usage_page, f.usage, f.report_id, (int)f.report_type, f.bit_size, f.bit_offset);
+      // Log ALL found fields (at INFO level so they're always visible)
+      for (size_t i = 0; i < report_map_.fields.size(); i++) {
+        auto &f = report_map_.fields[i];
+        ESP_LOGI(TAG, "  [%02d] page=0x%04X usage=0x%04X rid=%d type=%d exp=%d bits=%d@%d",
+                 (int)i, f.usage_page, f.usage, f.report_id, (int)f.report_type,
+                 f.unit_exponent, f.bit_size, f.bit_offset);
       }
     }
 
@@ -726,16 +732,21 @@ class CyberpowerUpsComponent : public Component {
 
     f = report_map_.find(USAGE_PAGE_BATTERY, BAT_USAGE_AC_PRESENT);
     if (f && read_field_value_(f, val)) {
+      ESP_LOGD(TAG, "ACPresent rid=%d raw=%d bits=%d@%d", f->report_id, val, f->bit_size, f->bit_offset);
       data_.ac_present = (val != 0);
+    } else {
+      ESP_LOGW(TAG, "ACPresent field %s", f ? "read failed" : "NOT FOUND");
     }
 
     f = report_map_.find(USAGE_PAGE_BATTERY, BAT_USAGE_DISCHARGING);
     if (f && read_field_value_(f, val)) {
+      ESP_LOGD(TAG, "Discharging rid=%d raw=%d", f->report_id, val);
       data_.on_battery = (val != 0);
     }
 
     f = report_map_.find(USAGE_PAGE_BATTERY, BAT_USAGE_CHARGING);
     if (f && read_field_value_(f, val)) {
+      ESP_LOGD(TAG, "Charging rid=%d raw=%d", f->report_id, val);
       data_.charging = (val != 0);
     }
 
