@@ -1,5 +1,11 @@
 # ESP CyberPower UPS Monitor
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![ESPHome](https://img.shields.io/badge/ESPHome-Component-blue.svg)](https://esphome.io/)
+[![Home Assistant](https://img.shields.io/badge/Home%20Assistant-Integration-41BDF5.svg)](https://www.home-assistant.io/)
+[![ESP32-S3](https://img.shields.io/badge/ESP32--S3-USB%20HID-red.svg)](https://www.espressif.com/en/products/socs/esp32-s3)
+[![GitHub Release](https://img.shields.io/github/v/release/ESDN83/esp-cyberpower-ups)](https://github.com/ESDN83/esp-cyberpower-ups/releases)
+
 ESP32-S3 reads a CyberPower UPS directly via USB HID and exposes all data as native ESPHome sensors in Home Assistant.
 
 **No NUT, no pwrstat, no SSH — direct USB → ESP32 → Home Assistant.**
