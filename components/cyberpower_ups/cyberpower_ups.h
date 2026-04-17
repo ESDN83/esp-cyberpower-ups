@@ -292,6 +292,8 @@ class CyberpowerUpsComponent : public Component {
     if (err != ESP_OK) {
       ESP_LOGE(TAG, "Transfer alloc failed: %s", esp_err_to_name(err));
       log_ring_append_("FATAL: Transfer alloc failed");
+      vTaskDelete(nullptr);
+      return;
     }
     ctrl_xfer_->callback = ctrl_xfer_cb_;
     ctrl_xfer_->context = this;
