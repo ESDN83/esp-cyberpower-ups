@@ -682,113 +682,91 @@ class CyberpowerUpsComponent : public Component {
   }
 
   // ── Poll all UPS data ─────────────────────────────────────
+  // USB control transfers take ~100-200ms each × ~15 fields = ~2-3s total.
+  // We build a local snapshot WITHOUT holding data_mutex_ (USB transfers would
+  // otherwise starve web UI and template sensor readers). Mutex is only taken
+  // briefly at the start (to seed from current state) and at the end (atomic commit).
   void poll_ups_data_() {
+    UpsData tmp;
+
+    // Seed local copy from current data_ (preserves model/serial/connected/state-machine fields)
+    xSemaphoreTake(data_mutex_, portMAX_DELAY);
+    tmp = data_;
+    xSemaphoreGive(data_mutex_);
+
     int32_t val;
 
-    xSemaphoreTake(data_mutex_, portMAX_DELAY);
+    // ── Sensor values (no mutex held — transfers can take seconds) ──
 
-    // ── Sensor values ──
-
-    // Input (utility) voltage — Page 0x84, within Input collection
     auto *f = report_map_.find(USAGE_PAGE_POWER_DEVICE, PD_USAGE_VOLTAGE);
-    if (f && read_field_value_(f, val)) {
-      data_.utility_voltage = (float)val;
-    }
+    if (f && read_field_value_(f, val)) tmp.utility_voltage = (float)val;
 
-    // Battery capacity
     f = report_map_.find(USAGE_PAGE_BATTERY, BAT_USAGE_REMAINING_CAPACITY);
-    if (f && read_field_value_(f, val)) {
-      data_.battery_capacity = (float)val;
-    }
+    if (f && read_field_value_(f, val)) tmp.battery_capacity = (float)val;
 
-    // Runtime to empty (seconds)
     f = report_map_.find(USAGE_PAGE_BATTERY, BAT_USAGE_RUNTIME_TO_EMPTY);
-    if (f && read_field_value_(f, val)) {
-      data_.remaining_runtime_sec = (float)val;
-    }
+    if (f && read_field_value_(f, val)) tmp.remaining_runtime_sec = (float)val;
 
-    // Percent load
     f = report_map_.find(USAGE_PAGE_POWER_DEVICE, PD_USAGE_PERCENT_LOAD);
-    if (f && read_field_value_(f, val)) {
-      data_.load_percent = (float)val;
-    }
+    if (f && read_field_value_(f, val)) tmp.load_percent = (float)val;
 
-    // Config voltage (rating)
     f = report_map_.find(USAGE_PAGE_POWER_DEVICE, PD_USAGE_CONFIG_VOLTAGE);
-    if (f && read_field_value_(f, val)) {
-      data_.rating_voltage = (float)val;
-    }
+    if (f && read_field_value_(f, val)) tmp.rating_voltage = (float)val;
 
-    // Config apparent power (rating VA)
     f = report_map_.find(USAGE_PAGE_POWER_DEVICE, PD_USAGE_CONFIG_APPARENT_POWER);
-    if (f && read_field_value_(f, val)) {
-      data_.rating_power_va = (float)val;
-    }
+    if (f && read_field_value_(f, val)) tmp.rating_power_va = (float)val;
     // rating_power_va may also come from model name (set during connect)
 
-    // Output voltage — try to find a second voltage field in output collection
-    // Many CyberPower UPS report output voltage same as input when on AC
-    // For now, use the same value (can be refined once we see real report descriptor)
-    data_.output_voltage = data_.utility_voltage;
+    // Output voltage — most CyberPower UPS report output same as input when on AC
+    tmp.output_voltage = tmp.utility_voltage;
 
     // ── Binary status ──
 
     f = report_map_.find(USAGE_PAGE_BATTERY, BAT_USAGE_AC_PRESENT);
-    if (f && read_field_value_(f, val)) {
-      data_.ac_present = (val != 0);
-    }
+    if (f && read_field_value_(f, val)) tmp.ac_present = (val != 0);
 
     f = report_map_.find(USAGE_PAGE_BATTERY, BAT_USAGE_DISCHARGING);
-    if (f && read_field_value_(f, val)) {
-      data_.on_battery = (val != 0);
-    }
+    if (f && read_field_value_(f, val)) tmp.on_battery = (val != 0);
 
     f = report_map_.find(USAGE_PAGE_BATTERY, BAT_USAGE_CHARGING);
-    if (f && read_field_value_(f, val)) {
-      data_.charging = (val != 0);
-    }
+    if (f && read_field_value_(f, val)) tmp.charging = (val != 0);
 
     f = report_map_.find(USAGE_PAGE_BATTERY, BAT_USAGE_OVERLOAD);
-    if (f && read_field_value_(f, val)) {
-      data_.overload = (val != 0);
-    }
+    if (f && read_field_value_(f, val)) tmp.overload = (val != 0);
 
     f = report_map_.find(USAGE_PAGE_BATTERY, BAT_USAGE_BELOW_REMAINING_CAP);
-    if (f && read_field_value_(f, val)) {
-      data_.battery_low_flag = (val != 0);
-    }
+    if (f && read_field_value_(f, val)) tmp.battery_low_flag = (val != 0);
 
     f = report_map_.find(USAGE_PAGE_BATTERY, BAT_USAGE_NEED_REPLACEMENT);
-    if (f && read_field_value_(f, val)) {
-      data_.replace_battery = (val != 0);
-    }
+    if (f && read_field_value_(f, val)) tmp.replace_battery = (val != 0);
 
     f = report_map_.find(USAGE_PAGE_BATTERY, BAT_USAGE_SHUTDOWN_IMMINENT);
-    if (f && read_field_value_(f, val)) {
-      data_.shutdown_imminent = (val != 0);
-    }
+    if (f && read_field_value_(f, val)) tmp.shutdown_imminent = (val != 0);
 
-    // ── State Machine ──
-    update_power_state_();
+    // ── State Machine (operates on local snapshot) ──
+    update_power_state_on_(tmp);
 
+    // ── Atomic commit — mutex held for microseconds only ──
+    xSemaphoreTake(data_mutex_, portMAX_DELAY);
+    data_ = tmp;
     xSemaphoreGive(data_mutex_);
 
     publish_pending_ = true;
   }
 
   // ── Power State Machine ───────────────────────────────────
-  // Must be called with data_mutex_ held!
-  void update_power_state_() {
+  // Operates on a local UpsData snapshot (no mutex held).
+  void update_power_state_on_(UpsData &d) {
     uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);  // millis
 
     // ── Transitions ──
 
     // AC returned -> back to normal
-    if (data_.ac_present && !data_.on_battery) {
-      if (data_.power_state != PowerState::NORMAL) {
-        data_.power_state = PowerState::NORMAL;
-        data_.power_fail_event_sent = false;
-        set_event_("AC Restored");
+    if (d.ac_present && !d.on_battery) {
+      if (d.power_state != PowerState::NORMAL) {
+        d.power_state = PowerState::NORMAL;
+        d.power_fail_event_sent = false;
+        set_event_on_(d, "AC Restored");
         ESP_LOGI(TAG, "AC restored, state -> NORMAL");
         log_ring_append_("AC restored -> NORMAL");
       }
@@ -796,10 +774,10 @@ class CyberpowerUpsComponent : public Component {
     }
 
     // UPS reports shutdown imminent
-    if (data_.shutdown_imminent) {
-      if (data_.power_state != PowerState::SHUTDOWN_IMMINENT) {
-        data_.power_state = PowerState::SHUTDOWN_IMMINENT;
-        set_event_("Shutdown Imminent");
+    if (d.shutdown_imminent) {
+      if (d.power_state != PowerState::SHUTDOWN_IMMINENT) {
+        d.power_state = PowerState::SHUTDOWN_IMMINENT;
+        set_event_on_(d, "Shutdown Imminent");
         ESP_LOGW(TAG, "UPS: Shutdown imminent!");
         log_ring_append_("SHUTDOWN IMMINENT!");
       }
@@ -807,39 +785,39 @@ class CyberpowerUpsComponent : public Component {
     }
 
     // Check battery low thresholds
-    bool runtime_low = (data_.remaining_runtime_sec > 0 &&
-                        data_.remaining_runtime_sec < (float)battery_low_runtime_s_);
-    bool capacity_low = (data_.battery_capacity > 0 &&
-                         data_.battery_capacity < (float)battery_low_capacity_pct_);
+    bool runtime_low = (d.remaining_runtime_sec > 0 &&
+                        d.remaining_runtime_sec < (float)battery_low_runtime_s_);
+    bool capacity_low = (d.battery_capacity > 0 &&
+                         d.battery_capacity < (float)battery_low_capacity_pct_);
 
-    if (data_.on_battery && (runtime_low || capacity_low || data_.battery_low_flag)) {
-      if (data_.power_state != PowerState::BATTERY_LOW &&
-          data_.power_state != PowerState::SHUTDOWN_IMMINENT) {
-        data_.power_state = PowerState::BATTERY_LOW;
-        set_event_("Battery Low");
+    if (d.on_battery && (runtime_low || capacity_low || d.battery_low_flag)) {
+      if (d.power_state != PowerState::BATTERY_LOW &&
+          d.power_state != PowerState::SHUTDOWN_IMMINENT) {
+        d.power_state = PowerState::BATTERY_LOW;
+        set_event_on_(d, "Battery Low");
         ESP_LOGW(TAG, "Battery low! runtime=%.0fs, capacity=%.0f%%",
-                 data_.remaining_runtime_sec, data_.battery_capacity);
+                 d.remaining_runtime_sec, d.battery_capacity);
         log_ring_append_("BATTERY LOW!");
       }
       return;
     }
 
     // On battery but not yet low
-    if (data_.on_battery) {
-      if (data_.power_state == PowerState::NORMAL) {
+    if (d.on_battery) {
+      if (d.power_state == PowerState::NORMAL) {
         // Start grace period
-        data_.power_state = PowerState::POWER_FAIL_GRACE;
-        data_.power_fail_start_ms = now;
+        d.power_state = PowerState::POWER_FAIL_GRACE;
+        d.power_fail_start_ms = now;
         ESP_LOGW(TAG, "Power failure detected, grace period %lus", power_fail_delay_s_);
         log_ring_append_("Power failure detected, starting grace period");
       }
 
-      if (data_.power_state == PowerState::POWER_FAIL_GRACE && !data_.power_fail_event_sent) {
-        uint32_t elapsed = now - data_.power_fail_start_ms;
+      if (d.power_state == PowerState::POWER_FAIL_GRACE && !d.power_fail_event_sent) {
+        uint32_t elapsed = now - d.power_fail_start_ms;
         if (elapsed >= power_fail_delay_s_ * 1000) {
           // Grace period expired — fire power failure event ONCE
-          data_.power_fail_event_sent = true;
-          set_event_("Power Failure");
+          d.power_fail_event_sent = true;
+          set_event_on_(d, "Power Failure");
           ESP_LOGW(TAG, "Power failure grace period expired!");
           log_ring_append_("Power failure event fired (grace expired)");
         }
@@ -847,10 +825,10 @@ class CyberpowerUpsComponent : public Component {
     }
   }
 
-  void set_event_(const char *event) {
-    strncpy(data_.last_event, event, sizeof(data_.last_event) - 1);
-    data_.last_event[sizeof(data_.last_event) - 1] = '\0';
-    data_.last_event_time = (uint32_t)(esp_timer_get_time() / 1000000);  // seconds since boot
+  void set_event_on_(UpsData &d, const char *event) {
+    strncpy(d.last_event, event, sizeof(d.last_event) - 1);
+    d.last_event[sizeof(d.last_event) - 1] = '\0';
+    d.last_event_time = (uint32_t)(esp_timer_get_time() / 1000000);  // seconds since boot
 
     // Fire ESPHome custom event
     fire_homeassistant_event_(event);
