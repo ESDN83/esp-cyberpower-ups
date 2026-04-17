@@ -160,6 +160,16 @@ class CyberpowerUpsComponent : public Component {
   void set_battery_low_runtime(uint32_t s) { battery_low_runtime_s_ = s; save_config_(); }
   void set_battery_low_capacity(uint32_t pct) { battery_low_capacity_pct_ = pct; save_config_(); }
 
+  // Web UI auth — empty string means no auth required.
+  // User is always "admin"; only password is stored.
+  const char *get_password() const { return password_; }
+  bool has_password() const { return password_[0] != '\0'; }
+  void set_password(const char *pw) {
+    strncpy(password_, pw, sizeof(password_) - 1);
+    password_[sizeof(password_) - 1] = '\0';
+    save_password_();
+  }
+
  private:
   SemaphoreHandle_t data_mutex_ = nullptr;
   SemaphoreHandle_t ctrl_sem_ = nullptr;
@@ -183,6 +193,7 @@ class CyberpowerUpsComponent : public Component {
   uint32_t power_fail_delay_s_ = 60;
   uint32_t battery_low_runtime_s_ = 300;
   uint32_t battery_low_capacity_pct_ = 35;
+  char password_[64] = {};  // Web UI password (empty = no auth)
 
   // ── NVS Config ────────────────────────────────────────────
   void load_config_() {
@@ -191,11 +202,23 @@ class CyberpowerUpsComponent : public Component {
       nvs_get_u32(nvs, "pf_delay", &power_fail_delay_s_);
       nvs_get_u32(nvs, "bl_runtime", &battery_low_runtime_s_);
       nvs_get_u32(nvs, "bl_capacity", &battery_low_capacity_pct_);
+      size_t pw_len = sizeof(password_);
+      nvs_get_str(nvs, "password", password_, &pw_len);
       nvs_close(nvs);
-      ESP_LOGI(TAG, "Config loaded: pf_delay=%lus, bl_runtime=%lus, bl_cap=%lu%%",
-               power_fail_delay_s_, battery_low_runtime_s_, battery_low_capacity_pct_);
+      ESP_LOGI(TAG, "Config loaded: pf_delay=%lus, bl_runtime=%lus, bl_cap=%lu%%, auth=%s",
+               power_fail_delay_s_, battery_low_runtime_s_, battery_low_capacity_pct_,
+               password_[0] ? "enabled" : "disabled");
     } else {
       ESP_LOGI(TAG, "No saved config, using defaults");
+    }
+  }
+
+  void save_password_() {
+    nvs_handle_t nvs;
+    if (nvs_open("ups_config", NVS_READWRITE, &nvs) == ESP_OK) {
+      nvs_set_str(nvs, "password", password_);
+      nvs_commit(nvs);
+      nvs_close(nvs);
     }
   }
 

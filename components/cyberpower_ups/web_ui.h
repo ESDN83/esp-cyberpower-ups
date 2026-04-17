@@ -24,12 +24,81 @@
 static httpd_handle_t httpd_ = nullptr;
 static CyberpowerUpsComponent *web_component_ = nullptr;
 
+// ── Base64 decode (for Basic Auth) ──────────────────────────
+static int base64_decode_char_(char c) {
+  if (c >= 'A' && c <= 'Z') return c - 'A';
+  if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+  if (c >= '0' && c <= '9') return c - '0' + 52;
+  if (c == '+') return 62;
+  if (c == '/') return 63;
+  return -1;
+}
+
+static size_t base64_decode_(const char *in, char *out, size_t out_size) {
+  size_t out_pos = 0;
+  int buf = 0;
+  int bits = 0;
+  while (*in && *in != '=' && out_pos < out_size - 1) {
+    int v = base64_decode_char_(*in++);
+    if (v < 0) continue;
+    buf = (buf << 6) | v;
+    bits += 6;
+    if (bits >= 8) {
+      bits -= 8;
+      out[out_pos++] = (char)((buf >> bits) & 0xFF);
+    }
+  }
+  out[out_pos] = '\0';
+  return out_pos;
+}
+
+// ── Auth check — returns true if authorized or no auth required ─
+// On failure, sends 401 with WWW-Authenticate and returns false.
+static bool check_auth_(httpd_req_t *req) {
+  if (!web_component_ || !web_component_->has_password()) return true;
+
+  char hdr[128];
+  if (httpd_req_get_hdr_value_str(req, "Authorization", hdr, sizeof(hdr)) != ESP_OK) {
+    httpd_resp_set_status(req, "401 Unauthorized");
+    httpd_resp_set_hdr(req, "WWW-Authenticate", "Basic realm=\"UPS Monitor\"");
+    httpd_resp_send(req, "Authentication required", HTTPD_RESP_USE_STRLEN);
+    return false;
+  }
+
+  // Expect "Basic <base64(user:password)>"
+  const char *b64 = strstr(hdr, "Basic ");
+  if (!b64) {
+    httpd_resp_set_status(req, "401 Unauthorized");
+    httpd_resp_set_hdr(req, "WWW-Authenticate", "Basic realm=\"UPS Monitor\"");
+    httpd_resp_send(req, "Bad auth header", HTTPD_RESP_USE_STRLEN);
+    return false;
+  }
+  b64 += 6;
+
+  char decoded[128];
+  base64_decode_(b64, decoded, sizeof(decoded));
+
+  // decoded = "user:password" — we accept any username; only password must match
+  const char *colon = strchr(decoded, ':');
+  const char *supplied_pw = colon ? colon + 1 : decoded;
+  const char *expected = web_component_->get_password();
+
+  if (strcmp(supplied_pw, expected) != 0) {
+    httpd_resp_set_status(req, "401 Unauthorized");
+    httpd_resp_set_hdr(req, "WWW-Authenticate", "Basic realm=\"UPS Monitor\"");
+    httpd_resp_send(req, "Invalid credentials", HTTPD_RESP_USE_STRLEN);
+    return false;
+  }
+  return true;
+}
+
 // ── HTML Page Generator ─────────────────────────────────────
 static esp_err_t root_handler_(httpd_req_t *req) {
   if (!web_component_) {
     httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Component not ready");
     return ESP_OK;
   }
+  if (!check_auth_(req)) return ESP_OK;
 
   auto data = web_component_->get_data();
 
@@ -153,9 +222,35 @@ static esp_err_t root_handler_(httpd_req_t *req) {
 
   httpd_resp_send_chunk(req, buf, len);
 
-  // Auto-refresh
+  // Password form — blank "new" field means no change; blank password disables auth.
   len = snprintf(buf, sizeof(buf),
-    "<script>setTimeout(()=>location.reload(), 5000);</script>"
+    "<div class='card'><h2>Access Control</h2>"
+    "<div class='item'><span class='label'>Auth Status</span>"
+    "<span class='status %s'>%s</span></div>"
+    "<form action='/password' method='POST'>"
+    "<div class='item'><span class='label'>New Password</span>"
+    "<input type='password' name='new' placeholder='leave blank to disable'></div>"
+    "<div style='text-align:right;margin-top:12px'>"
+    "<button type='submit'>Update Password</button></div>"
+    "</form>"
+    "<div style='color:#888;font-size:.85em;margin-top:8px'>"
+    "User: admin &middot; leave password empty to disable auth</div>"
+    "</div>",
+    web_component_->has_password() ? "ok" : "warn",
+    web_component_->has_password() ? "Enabled" : "Disabled (open)");
+
+  httpd_resp_send_chunk(req, buf, len);
+
+  // Auto-refresh — but skip reload while the user is editing a threshold input,
+  // otherwise their typed value is wiped every 5 seconds.
+  len = snprintf(buf, sizeof(buf),
+    "<script>"
+    "setInterval(function(){"
+      "var a=document.activeElement;"
+      "if(a && (a.tagName==='INPUT' || a.tagName==='TEXTAREA' || a.tagName==='SELECT'))return;"
+      "location.reload();"
+    "},5000);"
+    "</script>"
     "</body></html>");
   httpd_resp_send_chunk(req, buf, len);
 
@@ -165,6 +260,7 @@ static esp_err_t root_handler_(httpd_req_t *req) {
 
 // ── Config POST handler ─────────────────────────────────────
 static esp_err_t config_handler_(httpd_req_t *req) {
+  if (!check_auth_(req)) return ESP_OK;
   char body[256] = {};
   int recv = httpd_req_recv(req, body, sizeof(body) - 1);
   if (recv <= 0) {
@@ -195,8 +291,52 @@ static esp_err_t config_handler_(httpd_req_t *req) {
   return ESP_OK;
 }
 
+// ── Password POST handler ───────────────────────────────────
+// Requires current auth (if set) — prevents unauthenticated password change.
+static esp_err_t password_handler_(httpd_req_t *req) {
+  if (!check_auth_(req)) return ESP_OK;
+
+  char body[256] = {};
+  int recv = httpd_req_recv(req, body, sizeof(body) - 1);
+  if (recv <= 0) {
+    httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "No data");
+    return ESP_OK;
+  }
+  body[recv] = '\0';
+
+  char new_pw[64] = {};
+  char *p = strstr(body, "new=");
+  if (p) {
+    p += 4;
+    size_t i = 0;
+    while (*p && *p != '&' && i < sizeof(new_pw) - 1) {
+      // URL-decode: '+' → space, %XX → byte
+      if (*p == '+') { new_pw[i++] = ' '; p++; }
+      else if (*p == '%' && p[1] && p[2]) {
+        char hex[3] = { p[1], p[2], '\0' };
+        new_pw[i++] = (char)strtol(hex, nullptr, 16);
+        p += 3;
+      } else {
+        new_pw[i++] = *p++;
+      }
+    }
+    new_pw[i] = '\0';
+  }
+
+  if (web_component_) web_component_->set_password(new_pw);
+
+  httpd_resp_set_status(req, "303 See Other");
+  httpd_resp_set_hdr(req, "Location", "/");
+  httpd_resp_send(req, nullptr, 0);
+  return ESP_OK;
+}
+
 // ── Log endpoint ────────────────────────────────────────────
+// Copies the ring buffer to a local snapshot under the mutex, then releases
+// the mutex BEFORE sending. A slow HTTP client must not block log_ring_append_
+// (called from the USB task on every event).
 static esp_err_t log_handler_(httpd_req_t *req) {
+  if (!check_auth_(req)) return ESP_OK;
   httpd_resp_set_type(req, "text/plain");
 
   if (!log_ring_mutex_) {
@@ -204,14 +344,21 @@ static esp_err_t log_handler_(httpd_req_t *req) {
     return ESP_OK;
   }
 
+  // Snapshot under mutex (fast)
+  static char snapshot[LOG_RING_SIZE];
+  size_t head_snap;
   xSemaphoreTake(log_ring_mutex_, portMAX_DELAY);
+  memcpy(snapshot, log_ring_, LOG_RING_SIZE);
+  head_snap = log_ring_head_;
+  xSemaphoreGive(log_ring_mutex_);
 
+  // Send (no mutex held — slow clients can't starve the USB task)
   char line[256];
-  size_t pos = log_ring_head_;
+  size_t pos = head_snap;
   size_t line_pos = 0;
 
   for (size_t i = 0; i < LOG_RING_SIZE; i++) {
-    char c = log_ring_[pos];
+    char c = snapshot[pos];
     pos = (pos + 1) % LOG_RING_SIZE;
 
     if (c == '\0') continue;
@@ -229,8 +376,6 @@ static esp_err_t log_handler_(httpd_req_t *req) {
     line[line_pos] = '\0';
     httpd_resp_send_chunk(req, line, line_pos);
   }
-
-  xSemaphoreGive(log_ring_mutex_);
 
   httpd_resp_send_chunk(req, nullptr, 0);
   return ESP_OK;
@@ -255,6 +400,9 @@ static void start_web_ui_(CyberpowerUpsComponent *component) {
 
   httpd_uri_t config_uri = { .uri = "/config", .method = HTTP_POST, .handler = config_handler_ };
   httpd_register_uri_handler(httpd_, &config_uri);
+
+  httpd_uri_t password_uri = { .uri = "/password", .method = HTTP_POST, .handler = password_handler_ };
+  httpd_register_uri_handler(httpd_, &password_uri);
 
   httpd_uri_t log_uri = { .uri = "/log", .method = HTTP_GET, .handler = log_handler_ };
   httpd_register_uri_handler(httpd_, &log_uri);
