@@ -102,6 +102,7 @@ struct UpsData {
   // State machine
   PowerState power_state = PowerState::NORMAL;
   uint32_t power_fail_start_ms = 0;   // millis() when AC was lost
+  bool power_fail_event_sent = false; // set after grace expires to prevent re-firing
   char last_event[64] = "None";
   uint32_t last_event_time = 0;
 };
@@ -377,10 +378,13 @@ class CyberpowerUpsComponent : public Component {
       log_ring_append_("Warning: non-CyberPower VID, attempting HID Power Device anyway");
     }
 
-    // Get string descriptors
-    get_string_descriptor_(desc->iProduct, data_.model, sizeof(data_.model));
-    get_string_descriptor_(desc->iSerialNumber, data_.serial, sizeof(data_.serial));
-    ESP_LOGI(TAG, "Model: %s, Serial: %s", data_.model, data_.serial);
+    // Get string descriptors into local buffers — data_ is protected by mutex,
+    // so write to stack first and copy under lock below.
+    char tmp_model[64] = {};
+    char tmp_serial[64] = {};
+    get_string_descriptor_(desc->iProduct, tmp_model, sizeof(tmp_model));
+    get_string_descriptor_(desc->iSerialNumber, tmp_serial, sizeof(tmp_serial));
+    ESP_LOGI(TAG, "Model: %s, Serial: %s", tmp_model, tmp_serial);
 
     // Find HID interface
     const usb_config_desc_t *config_desc;
@@ -420,6 +424,10 @@ class CyberpowerUpsComponent : public Component {
     ESP_LOGI(TAG, "%s", msg);
 
     xSemaphoreTake(data_mutex_, portMAX_DELAY);
+    strncpy(data_.model, tmp_model, sizeof(data_.model) - 1);
+    data_.model[sizeof(data_.model) - 1] = '\0';
+    strncpy(data_.serial, tmp_serial, sizeof(data_.serial) - 1);
+    data_.serial[sizeof(data_.serial) - 1] = '\0';
     data_.connected = true;
 
     // Extract VA rating from model name (e.g. "BR1200ELCD" → 1200)
@@ -451,6 +459,7 @@ class CyberpowerUpsComponent : public Component {
     xSemaphoreTake(data_mutex_, portMAX_DELAY);
     data_.connected = false;
     data_.power_state = PowerState::NORMAL;
+    data_.power_fail_event_sent = false;
     xSemaphoreGive(data_mutex_);
 
     publish_pending_ = true;
@@ -778,6 +787,7 @@ class CyberpowerUpsComponent : public Component {
     if (data_.ac_present && !data_.on_battery) {
       if (data_.power_state != PowerState::NORMAL) {
         data_.power_state = PowerState::NORMAL;
+        data_.power_fail_event_sent = false;
         set_event_("AC Restored");
         ESP_LOGI(TAG, "AC restored, state -> NORMAL");
         log_ring_append_("AC restored -> NORMAL");
@@ -824,10 +834,11 @@ class CyberpowerUpsComponent : public Component {
         log_ring_append_("Power failure detected, starting grace period");
       }
 
-      if (data_.power_state == PowerState::POWER_FAIL_GRACE) {
+      if (data_.power_state == PowerState::POWER_FAIL_GRACE && !data_.power_fail_event_sent) {
         uint32_t elapsed = now - data_.power_fail_start_ms;
         if (elapsed >= power_fail_delay_s_ * 1000) {
-          // Grace period expired — fire power failure event
+          // Grace period expired — fire power failure event ONCE
+          data_.power_fail_event_sent = true;
           set_event_("Power Failure");
           ESP_LOGW(TAG, "Power failure grace period expired!");
           log_ring_append_("Power failure event fired (grace expired)");
