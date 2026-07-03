@@ -249,3 +249,86 @@ text_sensor:
       auto data = id(ups).get_data();
       return std::string(data.last_event);
     update_interval: 5s
+
+# ── Buttons (NUT-style instant commands) ──────────────────────
+# Each button sends a command to the UPS over USB HID (SET_REPORT).
+# A command is a no-op if the UPS does not expose the matching report;
+# check the ESPHome log or the /log page for "Cmd support: ..." after
+# boot to see what YOUR model accepts.
+#
+# The commands below are SAFE — reversible and with no effect on the
+# devices plugged into the UPS. The power-switching commands (reboot /
+# load off) are DANGEROUS and live in a commented-out block further down.
+
+button:
+  - platform: template
+    name: "Beeper Mute"
+    icon: "mdi:volume-mute"
+    entity_category: config
+    on_press:
+      - lambda: 'id(ups).queue_command(esphome::cyberpower_ups::UpsCommand::BEEPER_MUTE);'
+
+  - platform: template
+    name: "Beeper Enable"
+    icon: "mdi:volume-high"
+    entity_category: config
+    on_press:
+      - lambda: 'id(ups).queue_command(esphome::cyberpower_ups::UpsCommand::BEEPER_ENABLE);'
+
+  - platform: template
+    name: "Beeper Disable"
+    icon: "mdi:volume-off"
+    entity_category: config
+    on_press:
+      - lambda: 'id(ups).queue_command(esphome::cyberpower_ups::UpsCommand::BEEPER_DISABLE);'
+
+  - platform: template
+    name: "Battery Test Start"
+    icon: "mdi:battery-sync"
+    entity_category: diagnostic
+    on_press:
+      - lambda: 'id(ups).queue_command(esphome::cyberpower_ups::UpsCommand::TEST_BATTERY_START);'
+
+  - platform: template
+    name: "Battery Test Stop"
+    icon: "mdi:battery-off"
+    entity_category: diagnostic
+    on_press:
+      - lambda: 'id(ups).queue_command(esphome::cyberpower_ups::UpsCommand::TEST_BATTERY_STOP);'
+
+  - platform: template
+    name: "Cancel Shutdown"
+    icon: "mdi:cancel"
+    entity_category: config
+    on_press:
+      - lambda: 'id(ups).queue_command(esphome::cyberpower_ups::UpsCommand::SHUTDOWN_STOP);'
+
+# ══════════════════════════════════════════════════════════════
+#  ⚠️  DANGEROUS COMMANDS — DISABLED BY DEFAULT  ⚠️
+# ──────────────────────────────────────────────────────────────
+#  The buttons below switch the UPS *output*. Pressing them will
+#  cut power to every device plugged into the UPS (your NAS, PC,
+#  network gear, …), after a short delay — even while running on
+#  mains. There is NO confirmation prompt on the ESPHome entity;
+#  the button acts the instant it is pressed or called from an
+#  automation.
+#
+#  Enable them ONLY if you understand the consequences. To do so,
+#  remove the '# ' from each line below. It is strongly recommended
+#  to also add a confirmation dialog on the Home Assistant dashboard
+#  card (see README → "Dangerous commands").
+# ══════════════════════════════════════════════════════════════
+#
+#  - platform: template
+#    name: "UPS Reboot Load"
+#    icon: "mdi:restart-alert"
+#    entity_category: config
+#    on_press:
+#      - lambda: 'id(ups).queue_command(esphome::cyberpower_ups::UpsCommand::SHUTDOWN_REBOOT);'
+#
+#  - platform: template
+#    name: "UPS Load Off"
+#    icon: "mdi:power-plug-off"
+#    entity_category: config
+#    on_press:
+#      - lambda: 'id(ups).queue_command(esphome::cyberpower_ups::UpsCommand::LOAD_OFF_DELAY);'

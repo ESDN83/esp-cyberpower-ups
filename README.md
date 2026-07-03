@@ -16,6 +16,7 @@ ESP32-S3 reads a CyberPower UPS directly via USB HID and exposes all data as nat
 - Native ESPHome sensors (voltage, battery, load, runtime, status)
 - Power failure detection with configurable thresholds
 - HA events for automations (Power Failure, Battery Low, Shutdown Imminent)
+- NUT-style command buttons (beeper, battery test, cancel shutdown) — see [Commands / Buttons](#commands--buttons)
 - Web UI for live status and configuration
 - No separate server or daemon required
   
@@ -78,6 +79,59 @@ See `esphome/cyberpower-ups.yaml` for the full configuration with all sensors.
 | Charging | Binary | Battery is charging |
 | Overload | Binary | UPS is overloaded |
 | UPS Status | Text | Normal / Power Failure / Battery Low / Shutdown |
+
+## Commands / Buttons
+
+Besides reading data, the component can send **NUT-style instant commands** back to
+the UPS over USB HID (`SET_REPORT` on the matching FEATURE report). These appear as
+**button entities** in Home Assistant.
+
+Support depends on the UPS model. After boot the log prints a line such as
+`Cmd support: beeper=YES test=YES load=no` (visible in the ESPHome log and on the
+`http://<device-ip>/log` page) so you can see what **your** model accepts. A button
+for an unsupported command is simply a no-op (logged as "NOT supported").
+
+### Safe commands (enabled by default)
+
+| Button | NUT command | Effect |
+|--------|-------------|--------|
+| Beeper Mute | `beeper.mute` | Silence the currently sounding alarm |
+| Beeper Enable | `beeper.enable` | Re-enable the audible alarm |
+| Beeper Disable | `beeper.disable` | Disable the audible alarm |
+| Battery Test Start | `test.battery.start.quick` | Run a quick battery self-test |
+| Battery Test Stop | `test.battery.stop` | Abort a running battery test |
+| Cancel Shutdown | `shutdown.stop` | Cancel a pending shutdown/reboot |
+
+These are reversible and do **not** affect the devices plugged into the UPS.
+
+### Dangerous commands (disabled by default) ⚠️
+
+The following commands switch the **UPS output** — pressing them cuts power to
+everything plugged into the UPS (NAS, PC, network gear …), after a short delay,
+**even while running on mains**:
+
+| Button | NUT command | Effect |
+|--------|-------------|--------|
+| UPS Reboot Load | `shutdown.reboot` | Turn the load off, then back on |
+| UPS Load Off | `load.off.delay` | Turn the load off and keep it off |
+
+They are shipped **commented out** in `esphome/cyberpower-ups.yaml`. Enable them only
+if you understand the consequences, by removing the leading `# ` from the block marked
+`DANGEROUS COMMANDS`.
+
+> **No confirmation on the entity.** An ESPHome/HA button fires the instant it is
+> pressed or called from an automation — there is no built-in "are you sure?" prompt.
+> For the dangerous buttons, add a confirmation dialog on the **Home Assistant
+> dashboard card** instead:
+>
+> ```yaml
+> type: button
+> entity: button.cyberpower_ups_monitor_ups_load_off
+> tap_action:
+>   action: toggle
+>   confirmation:
+>     text: "Really cut power to all devices on the UPS?"
+> ```
 
 ## Power Failure Logic
 
@@ -143,11 +197,11 @@ CyberPower UPS
     │ USB HID (Power Device Class)
     ▼
 ESP32-S3 (USB Host)
-    │ GET_REPORT Control Transfers (every 5s)
-    ▼
-HID Report Parser → State Machine
+    │ GET_REPORT (read, every 5s)  ▲ SET_REPORT (commands)
+    ▼                              │
+HID Report Parser → State Machine ─┴─ Command Queue
     │
-    ├──→ ESPHome API → Home Assistant (Sensors + Events)
+    ├──→ ESPHome API → Home Assistant (Sensors + Events + Buttons)
     └──→ Web UI (Port 80, Live Status)
 ```
 

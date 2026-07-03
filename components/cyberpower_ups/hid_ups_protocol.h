@@ -42,6 +42,15 @@ static constexpr uint16_t PD_USAGE_PRESENT_STATUS   = 0x0024;
 static constexpr uint16_t PD_USAGE_SWITCHABLE       = 0x006B;
 static constexpr uint16_t PD_USAGE_TEST             = 0x001E;
 
+// ── Power Device Page (0x84) — writable command usages ──────
+// These live in FEATURE reports and are written via SET_REPORT to
+// trigger UPS actions. Usage numbers per HID Power Device Class spec.
+static constexpr uint16_t PD_USAGE_DELAY_BEFORE_REBOOT   = 0x0055;
+static constexpr uint16_t PD_USAGE_DELAY_BEFORE_STARTUP  = 0x0056;
+static constexpr uint16_t PD_USAGE_DELAY_BEFORE_SHUTDOWN = 0x0057;
+static constexpr uint16_t PD_USAGE_TEST_CMD              = 0x0058;  // battery test (1=quick,2=deep,3=abort)
+static constexpr uint16_t PD_USAGE_AUDIBLE_ALARM_CTRL    = 0x005A;  // beeper (1=disable,2=enable,3=mute)
+
 // ── Battery System Page (0x85) Usages ───────────────────────
 static constexpr uint16_t BAT_USAGE_REMAINING_CAPACITY   = 0x0066;
 static constexpr uint16_t BAT_USAGE_RUNTIME_TO_EMPTY     = 0x0068;
@@ -288,6 +297,27 @@ static int32_t extract_field_value(const uint8_t *report_data, const HidField &f
   }
 
   return (int32_t)value;
+}
+
+// ── Value encoding into raw report data (inverse of extract) ──
+// Writes `value` into the field's bit range within report_data.
+// report_data must NOT include the report_id byte. Bits outside the
+// field are left untouched (read-modify-write friendly).
+static void encode_field_value(uint8_t *report_data, const HidField &field, int32_t value) {
+  uint16_t bit_off = field.bit_offset;
+  uint16_t bit_len = field.bit_size;
+  if (bit_len == 0 || bit_len > 32) return;
+
+  uint32_t uval = (uint32_t)value;
+  for (uint16_t i = 0; i < bit_len; i++) {
+    uint16_t abs_bit = bit_off + i;
+    uint16_t byte_idx = abs_bit / 8;
+    uint8_t  bit_idx = abs_bit % 8;
+    if ((uval >> i) & 1u)
+      report_data[byte_idx] |= (uint8_t)(1u << bit_idx);
+    else
+      report_data[byte_idx] &= (uint8_t)~(1u << bit_idx);
+  }
 }
 
 // Apply unit exponent to get real-world value

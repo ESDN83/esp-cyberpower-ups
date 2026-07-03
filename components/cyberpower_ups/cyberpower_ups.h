@@ -74,6 +74,28 @@ static const char *power_state_str(PowerState s) {
   }
 }
 
+// ── UPS Commands (NUT-style instant commands) ───────────────
+// Sent from any task via queue_command(); executed on the USB task
+// as a SET_REPORT on the matching FEATURE report.
+//   SAFE     : reversible, no impact on the protected load
+//   DANGEROUS: switches the UPS output — can power off connected devices
+enum class UpsCommand : uint8_t {
+  // ── Safe ──
+  BEEPER_MUTE = 0,       // AudibleAlarmControl = 3 (mute current alarm)
+  BEEPER_ENABLE,         // AudibleAlarmControl = 2
+  BEEPER_DISABLE,        // AudibleAlarmControl = 1
+  TEST_BATTERY_START,    // Test = 1 (quick self-test)
+  TEST_BATTERY_STOP,     // Test = 3 (abort test)
+  SHUTDOWN_STOP,         // DelayBeforeShutdown = -1 (cancel a pending shutdown)
+  // ── Dangerous (opt-in) ──
+  SHUTDOWN_REBOOT,       // DelayBeforeReboot  = REBOOT_DELAY_S  (turn load off, then back on)
+  LOAD_OFF_DELAY,        // DelayBeforeShutdown = LOAD_OFF_DELAY_S (turn load off, stay off)
+};
+
+// Delay values (seconds) for the load-switching commands.
+static constexpr int32_t REBOOT_DELAY_S   = 10;
+static constexpr int32_t LOAD_OFF_DELAY_S = 20;
+
 // ── UPS Data (shared between tasks, protected by mutex) ─────
 struct UpsData {
   // Sensor values
@@ -160,6 +182,24 @@ class CyberpowerUpsComponent : public Component {
   void set_battery_low_runtime(uint32_t s) { battery_low_runtime_s_ = s; save_config_(); }
   void set_battery_low_capacity(uint32_t pct) { battery_low_capacity_pct_ = pct; save_config_(); }
 
+  // ── UPS command dispatch ──────────────────────────────────
+  // Callable from any task (button lambdas run on the main loop).
+  // The command is queued and executed on the USB task; it is a
+  // no-op if the UPS does not expose the matching FEATURE report.
+  void queue_command(UpsCommand cmd) {
+    if (!cmd_queue_) return;
+    uint8_t c = (uint8_t)cmd;
+    if (xQueueSend(cmd_queue_, &c, 0) != pdTRUE)
+      ESP_LOGW(TAG, "Command queue full, dropped command %d", c);
+  }
+
+  // Capability flags — true once the report descriptor is parsed and
+  // the matching FEATURE report is present. Let the UI hide unsupported
+  // buttons if desired.
+  bool supports_beeper() const { return supports_beeper_; }
+  bool supports_battery_test() const { return supports_battery_test_; }
+  bool supports_load_control() const { return supports_load_control_; }
+
   // Web UI auth — empty string means no auth required.
   // User is always "admin"; only password is stored.
   const char *get_password() const { return password_; }
@@ -173,8 +213,14 @@ class CyberpowerUpsComponent : public Component {
  private:
   SemaphoreHandle_t data_mutex_ = nullptr;
   SemaphoreHandle_t ctrl_sem_ = nullptr;
+  QueueHandle_t cmd_queue_ = nullptr;
   UpsData data_;
   std::atomic<bool> publish_pending_{false};
+
+  // Command capabilities (set once report descriptor is parsed)
+  bool supports_beeper_ = false;
+  bool supports_battery_test_ = false;
+  bool supports_load_control_ = false;
 
   // USB host state
   usb_host_client_handle_t client_hdl_ = nullptr;
@@ -344,7 +390,13 @@ class CyberpowerUpsComponent : public Component {
       // If connected, poll UPS data
       if (device_open_) {
         poll_ups_data_();
-        vTaskDelay(pdMS_TO_TICKS(POLL_INTERVAL_MS));
+        // Wait out the poll interval in small slices so queued commands
+        // (beeper, test, …) are dispatched within ~100ms instead of 5s.
+        for (uint32_t waited = 0; waited < POLL_INTERVAL_MS && device_open_; waited += 100) {
+          process_commands_();
+          vTaskDelay(pdMS_TO_TICKS(100));
+        }
+        process_commands_();
         heartbeat = 0;
       } else {
         // Heartbeat + active device scan every 10s when no device connected
@@ -446,6 +498,9 @@ class CyberpowerUpsComponent : public Component {
     log_ring_append_(msg);
     ESP_LOGI(TAG, "%s", msg);
 
+    // Detect which NUT-style commands this UPS accepts
+    probe_capabilities_();
+
     xSemaphoreTake(data_mutex_, portMAX_DELAY);
     strncpy(data_.model, tmp_model, sizeof(data_.model) - 1);
     data_.model[sizeof(data_.model) - 1] = '\0';
@@ -478,6 +533,8 @@ class CyberpowerUpsComponent : public Component {
     dev_addr_ = 0;
     dev_hdl_ = nullptr;
     report_map_.fields.clear();
+    supports_beeper_ = supports_battery_test_ = supports_load_control_ = false;
+    if (cmd_queue_) xQueueReset(cmd_queue_);  // drop pending commands
 
     xSemaphoreTake(data_mutex_, portMAX_DELAY);
     data_.connected = false;
@@ -704,6 +761,135 @@ class CyberpowerUpsComponent : public Component {
     return true;
   }
 
+  // ── Write a single HID Feature Report (SET_REPORT) ────────
+  bool write_hid_report_(uint8_t report_id, ReportType type, uint8_t *buf, size_t len) {
+    uint8_t hid_type = (type == ReportType::INPUT) ? HID_REPORT_TYPE_INPUT : HID_REPORT_TYPE_FEATURE;
+    uint16_t wValue = (hid_type << 8) | report_id;
+
+    esp_err_t err = ctrl_transfer_sync_(
+      USB_BM_REQUEST_TYPE_DIR_OUT | USB_BM_REQUEST_TYPE_TYPE_CLASS | USB_BM_REQUEST_TYPE_RECIP_INTERFACE,
+      HID_REQ_SET_REPORT,
+      wValue,
+      hid_iface_num_,
+      len, buf);
+
+    return (err == ESP_OK);
+  }
+
+  // ── Write a single field value to the UPS ─────────────────
+  // Read-modify-write: fetches the current FEATURE report, sets only
+  // this field's bits, and writes it back — so sibling fields sharing
+  // the same report ID are preserved.
+  bool set_field_value_(const HidField *field, int32_t value) {
+    if (!field) return false;
+
+    // Report data size (max bit offset + size across this report ID)
+    size_t report_bytes = 0;
+    for (auto &f : report_map_.fields) {
+      if (f.report_id == field->report_id && f.report_type == field->report_type) {
+        size_t end = (f.bit_offset + f.bit_size + 7) / 8;
+        if (end > report_bytes) report_bytes = end;
+      }
+    }
+    if (report_bytes == 0) report_bytes = 8;
+
+    // Buffer layout matches GET_REPORT: [report_id][data...]
+    size_t xfer_bytes = report_bytes + 1;
+    if (xfer_bytes > 63) xfer_bytes = 63;
+
+    uint8_t report_buf[64] = {};
+    // Seed with current contents (best effort; zero-fill if read fails)
+    if (!read_hid_report_(field->report_id, field->report_type, report_buf, xfer_bytes))
+      memset(report_buf, 0, sizeof(report_buf));
+
+    report_buf[0] = field->report_id;
+    encode_field_value(report_buf + 1, *field, value);
+
+    return write_hid_report_(field->report_id, field->report_type, report_buf, xfer_bytes);
+  }
+
+  // ── Execute a single queued command (USB task context) ────
+  void execute_command_(UpsCommand cmd) {
+    if (!device_open_) {
+      ESP_LOGW(TAG, "Command %d ignored — UPS not connected", (int)cmd);
+      return;
+    }
+
+    const HidField *f = nullptr;
+    int32_t value = 0;
+    const char *name = "?";
+
+    switch (cmd) {
+      case UpsCommand::BEEPER_MUTE:
+        f = report_map_.find(USAGE_PAGE_POWER_DEVICE, PD_USAGE_AUDIBLE_ALARM_CTRL);
+        value = 3; name = "beeper.mute"; break;
+      case UpsCommand::BEEPER_ENABLE:
+        f = report_map_.find(USAGE_PAGE_POWER_DEVICE, PD_USAGE_AUDIBLE_ALARM_CTRL);
+        value = 2; name = "beeper.enable"; break;
+      case UpsCommand::BEEPER_DISABLE:
+        f = report_map_.find(USAGE_PAGE_POWER_DEVICE, PD_USAGE_AUDIBLE_ALARM_CTRL);
+        value = 1; name = "beeper.disable"; break;
+      case UpsCommand::TEST_BATTERY_START:
+        f = report_map_.find(USAGE_PAGE_POWER_DEVICE, PD_USAGE_TEST_CMD);
+        value = 1; name = "test.battery.start"; break;
+      case UpsCommand::TEST_BATTERY_STOP:
+        f = report_map_.find(USAGE_PAGE_POWER_DEVICE, PD_USAGE_TEST_CMD);
+        value = 3; name = "test.battery.stop"; break;
+      case UpsCommand::SHUTDOWN_STOP:
+        f = report_map_.find(USAGE_PAGE_POWER_DEVICE, PD_USAGE_DELAY_BEFORE_SHUTDOWN);
+        value = -1; name = "shutdown.stop"; break;
+      case UpsCommand::SHUTDOWN_REBOOT:
+        f = report_map_.find(USAGE_PAGE_POWER_DEVICE, PD_USAGE_DELAY_BEFORE_REBOOT);
+        value = REBOOT_DELAY_S; name = "shutdown.reboot"; break;
+      case UpsCommand::LOAD_OFF_DELAY:
+        f = report_map_.find(USAGE_PAGE_POWER_DEVICE, PD_USAGE_DELAY_BEFORE_SHUTDOWN);
+        value = LOAD_OFF_DELAY_S; name = "load.off.delay"; break;
+    }
+
+    char msg[80];
+    if (!f) {
+      ESP_LOGW(TAG, "Command '%s' not supported by this UPS", name);
+      snprintf(msg, sizeof(msg), "Command '%s' NOT supported", name);
+      log_ring_append_(msg);
+      return;
+    }
+
+    bool ok = set_field_value_(f, value);
+    ESP_LOGI(TAG, "Command '%s' (=%ld) -> %s", name, (long)value, ok ? "OK" : "FAILED");
+    snprintf(msg, sizeof(msg), "Command '%s' %s", name, ok ? "sent" : "FAILED");
+    log_ring_append_(msg);
+  }
+
+  // ── Drain and execute all queued commands (USB task) ──────
+  void process_commands_() {
+    if (!cmd_queue_) return;
+    uint8_t c;
+    while (xQueueReceive(cmd_queue_, &c, 0) == pdTRUE) {
+      execute_command_((UpsCommand)c);
+    }
+  }
+
+  // ── Probe which command reports this UPS exposes ──────────
+  void probe_capabilities_() {
+    supports_beeper_ =
+      report_map_.find(USAGE_PAGE_POWER_DEVICE, PD_USAGE_AUDIBLE_ALARM_CTRL) != nullptr;
+    supports_battery_test_ =
+      report_map_.find(USAGE_PAGE_POWER_DEVICE, PD_USAGE_TEST_CMD) != nullptr;
+    supports_load_control_ =
+      report_map_.find(USAGE_PAGE_POWER_DEVICE, PD_USAGE_DELAY_BEFORE_SHUTDOWN) != nullptr;
+
+    ESP_LOGI(TAG, "UPS command support: beeper=%s test=%s load-control=%s",
+             supports_beeper_ ? "YES" : "no",
+             supports_battery_test_ ? "YES" : "no",
+             supports_load_control_ ? "YES" : "no");
+    char msg[80];
+    snprintf(msg, sizeof(msg), "Cmd support: beeper=%s test=%s load=%s",
+             supports_beeper_ ? "YES" : "no",
+             supports_battery_test_ ? "YES" : "no",
+             supports_load_control_ ? "YES" : "no");
+    log_ring_append_(msg);
+  }
+
   // ── Poll all UPS data ─────────────────────────────────────
   // USB control transfers take ~100-200ms each × ~15 fields = ~2-3s total.
   // We build a local snapshot WITHOUT holding data_mutex_ (USB transfers would
@@ -878,6 +1064,7 @@ inline void CyberpowerUpsComponent::setup() {
 
   data_mutex_ = xSemaphoreCreateMutex();
   ctrl_sem_ = xSemaphoreCreateBinary();
+  cmd_queue_ = xQueueCreate(8, sizeof(uint8_t));
 
   // Load config from NVS
   load_config_();
