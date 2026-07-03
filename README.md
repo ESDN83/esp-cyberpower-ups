@@ -104,6 +104,11 @@ for an unsupported command is simply a no-op (logged as "NOT supported").
 
 These are reversible and do **not** affect the devices plugged into the UPS.
 
+> **Battery test & shutdown automations:** a self-test runs the UPS on battery on
+> purpose and may briefly report a low capacity. The firmware suppresses the
+> power-failure / battery-low state machine for ~45 s after a test is started, so
+> `Battery Test Start` will **not** trigger your shutdown automations.
+
 ### Dangerous commands (disabled by default) ⚠️
 
 The following commands switch the **UPS output** — pressing them cuts power to

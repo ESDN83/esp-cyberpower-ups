@@ -96,6 +96,12 @@ enum class UpsCommand : uint8_t {
 static constexpr int32_t REBOOT_DELAY_S   = 10;
 static constexpr int32_t LOAD_OFF_DELAY_S = 20;
 
+// While a battery self-test runs, the UPS switches to battery on purpose.
+// Suppress the power-fail/battery-low state machine for this long after a
+// test is started so it does not trigger shutdown automations. A quick
+// self-test lasts only a few seconds; this window is a safe upper bound.
+static constexpr uint32_t TEST_SUPPRESS_MS = 45000;
+
 // ── UPS Data (shared between tasks, protected by mutex) ─────
 struct UpsData {
   // Sensor values
@@ -221,6 +227,10 @@ class CyberpowerUpsComponent : public Component {
   bool supports_beeper_ = false;
   bool supports_battery_test_ = false;
   bool supports_load_control_ = false;
+
+  // Non-zero while a battery self-test is running (millis deadline).
+  // Power-fail logic is suppressed until then. See TEST_SUPPRESS_MS.
+  uint32_t test_active_until_ms_ = 0;
 
   // USB host state
   usb_host_client_handle_t client_hdl_ = nullptr;
@@ -534,6 +544,7 @@ class CyberpowerUpsComponent : public Component {
     dev_hdl_ = nullptr;
     report_map_.fields.clear();
     supports_beeper_ = supports_battery_test_ = supports_load_control_ = false;
+    test_active_until_ms_ = 0;
     if (cmd_queue_) xQueueReset(cmd_queue_);  // drop pending commands
 
     xSemaphoreTake(data_mutex_, portMAX_DELAY);
@@ -858,6 +869,18 @@ class CyberpowerUpsComponent : public Component {
     ESP_LOGI(TAG, "Command '%s' (=%ld) -> %s", name, (long)value, ok ? "OK" : "FAILED");
     snprintf(msg, sizeof(msg), "Command '%s' %s", name, ok ? "sent" : "FAILED");
     log_ring_append_(msg);
+
+    // A running self-test puts the UPS on battery deliberately — arm the
+    // suppression window so it is not mistaken for a real power failure.
+    uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+    if (ok && cmd == UpsCommand::TEST_BATTERY_START) {
+      test_active_until_ms_ = now_ms + TEST_SUPPRESS_MS;
+      ESP_LOGI(TAG, "Self-test started — power-fail logic suppressed for %lus",
+               (unsigned long)(TEST_SUPPRESS_MS / 1000));
+      log_ring_append_("Self-test: power-fail logic suppressed");
+    } else if (cmd == UpsCommand::TEST_BATTERY_STOP) {
+      test_active_until_ms_ = 0;
+    }
   }
 
   // ── Drain and execute all queued commands (USB task) ──────
@@ -967,6 +990,21 @@ class CyberpowerUpsComponent : public Component {
   // Operates on a local UpsData snapshot (no mutex held).
   void update_power_state_on_(UpsData &d) {
     uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);  // millis
+
+    // ── Self-test suppression ──
+    // A battery self-test intentionally runs the UPS on battery (and can
+    // briefly report a low capacity). Do NOT treat that as a power failure,
+    // or shutdown automations would fire during a routine test.
+    if (test_active_until_ms_ != 0) {
+      if (now < test_active_until_ms_) {
+        if (d.power_state != PowerState::NORMAL) {
+          d.power_state = PowerState::NORMAL;
+          d.power_fail_event_sent = false;
+        }
+        return;
+      }
+      test_active_until_ms_ = 0;  // window elapsed — resume normal logic
+    }
 
     // ── Transitions ──
 
