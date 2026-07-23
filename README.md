@@ -268,6 +268,13 @@ descriptor there. Copy the whole thing — it looks like this:
 - Whether the wrong value **changes over time or is frozen**. A reading
   that never moves is the strongest hint that the wrong field is being
   read; check the history in Home Assistant, not just the current value.
+- **The parsed field count, from two or three separate boots.** The line
+  reads `usage resolution (N fields parsed)`. It must be the same number
+  every time. If it varies, the descriptor is arriving incomplete —
+  look for a `HID desc short read` warning in the same log. A truncated
+  descriptor loses whole fields off the end, and the command reports
+  (Test, DelayBeforeShutdown) sit right there, so `Cmd support:` will
+  flip to `no` while the sensors still look fine.
 
 ### Reading the dump yourself
 

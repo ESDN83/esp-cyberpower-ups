@@ -611,9 +611,14 @@ class CyberpowerUpsComponent : public Component {
   }
 
   // Synchronous control transfer — blocks until complete
+  // actual_len, when given, receives the number of bytes actually
+  // returned by an IN transfer. A device may answer with fewer bytes
+  // than requested; without this the caller cannot tell, and anything
+  // past that point in its buffer is whatever was there before.
   esp_err_t ctrl_transfer_sync_(uint8_t bmRequestType, uint8_t bRequest,
                                  uint16_t wValue, uint16_t wIndex,
-                                 uint16_t wLength, uint8_t *data_out = nullptr) {
+                                 uint16_t wLength, uint8_t *data_out = nullptr,
+                                 size_t *actual_len = nullptr) {
     ctrl_xfer_->device_handle = dev_hdl_;
     ctrl_xfer_->bEndpointAddress = 0;
 
@@ -660,9 +665,17 @@ class CyberpowerUpsComponent : public Component {
 
     // Copy response data back
     if ((bmRequestType & USB_BM_REQUEST_TYPE_DIR_IN) && data_out && wLength > 0) {
-      size_t actual = ctrl_xfer_->actual_num_bytes - sizeof(usb_setup_packet_t);
+      // actual_num_bytes covers the setup packet too. Guard the
+      // subtraction: a stack that reports less than the setup size would
+      // otherwise wrap size_t into a huge value.
+      size_t total = ctrl_xfer_->actual_num_bytes;
+      size_t actual = (total > sizeof(usb_setup_packet_t))
+                    ? total - sizeof(usb_setup_packet_t) : 0;
       if (actual > wLength) actual = wLength;
       memcpy(data_out, ctrl_xfer_->data_buffer + sizeof(usb_setup_packet_t), actual);
+      if (actual_len) *actual_len = actual;
+    } else if (actual_len) {
+      *actual_len = 0;
     }
 
     return ESP_OK;
@@ -699,16 +712,34 @@ class CyberpowerUpsComponent : public Component {
     if (desc_len > CTRL_BUF_SIZE - sizeof(usb_setup_packet_t))
       desc_len = CTRL_BUF_SIZE - sizeof(usb_setup_packet_t);
 
-    uint8_t *desc_buf = (uint8_t *)malloc(desc_len);
+    // calloc, not malloc: a short transfer leaves the tail untouched,
+    // and parsing uninitialised heap yields a different report map on
+    // every boot — fields silently disappear off the end.
+    uint8_t *desc_buf = (uint8_t *)calloc(1, desc_len);
     if (!desc_buf) return false;
 
-    // GET_DESCRIPTOR (HID Report Descriptor) — Standard request to interface
-    esp_err_t err = ctrl_transfer_sync_(
-      USB_BM_REQUEST_TYPE_DIR_IN | USB_BM_REQUEST_TYPE_TYPE_STANDARD | USB_BM_REQUEST_TYPE_RECIP_INTERFACE,
-      USB_B_REQUEST_GET_DESCRIPTOR,
-      (USB_DT_HID_REPORT << 8),
-      hid_iface_num_,
-      desc_len, desc_buf);
+    // GET_DESCRIPTOR (HID Report Descriptor) — Standard request to interface.
+    // Retried, because a short answer here costs whole fields: the tail
+    // of a Power Device descriptor holds the command reports (Test,
+    // DelayBeforeShutdown), so losing it silently disables commands.
+    size_t got = 0;
+    esp_err_t err = ESP_FAIL;
+    for (int attempt = 1; attempt <= 3; attempt++) {
+      memset(desc_buf, 0, desc_len);
+      got = 0;
+      err = ctrl_transfer_sync_(
+        USB_BM_REQUEST_TYPE_DIR_IN | USB_BM_REQUEST_TYPE_TYPE_STANDARD | USB_BM_REQUEST_TYPE_RECIP_INTERFACE,
+        USB_B_REQUEST_GET_DESCRIPTOR,
+        (USB_DT_HID_REPORT << 8),
+        hid_iface_num_,
+        desc_len, desc_buf, &got);
+
+      if (err == ESP_OK && got == desc_len) break;
+
+      ESP_LOGW(TAG, "HID report descriptor read attempt %d: %s, got %u of %u bytes",
+               attempt, esp_err_to_name(err), (unsigned) got, (unsigned) desc_len);
+      vTaskDelay(pdMS_TO_TICKS(50));
+    }
 
     if (err != ESP_OK) {
       ESP_LOGE(TAG, "Failed to get HID report descriptor: %s", esp_err_to_name(err));
@@ -716,11 +747,21 @@ class CyberpowerUpsComponent : public Component {
       return false;
     }
 
-    ESP_LOGI(TAG, "HID Report Desc: %d bytes", (int)desc_len);
+    if (got < desc_len) {
+      // Parse what arrived rather than nothing, but say so: an
+      // incomplete map is exactly how sensors or commands go missing.
+      char msg[96];
+      snprintf(msg, sizeof(msg), "WARN: HID desc short read %u/%u bytes - map may be incomplete",
+               (unsigned) got, (unsigned) desc_len);
+      ESP_LOGW(TAG, "%s", msg);
+      log_ring_append_(msg);
+    }
 
-    // Parse
+    ESP_LOGI(TAG, "HID Report Desc: %u of %u bytes", (unsigned) got, (unsigned) desc_len);
+
+    // Parse only what was actually received.
     report_map_ = {};
-    bool ok = parse_report_descriptor(desc_buf, desc_len, report_map_);
+    bool ok = parse_report_descriptor(desc_buf, got, report_map_);
     free(desc_buf);
 
     if (ok) {
