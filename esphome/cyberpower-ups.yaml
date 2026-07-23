@@ -82,6 +82,22 @@ sensor:
       return data.output_voltage;
     update_interval: 5s
 
+  # Battery pack voltage, from the PowerSummary collection. On a 24 V
+  # pack this reads around 25-27 V and barely moves while on mains.
+  - platform: template
+    name: "Battery Voltage"
+    id: battery_voltage
+    unit_of_measurement: "V"
+    device_class: voltage
+    state_class: measurement
+    accuracy_decimals: 1
+    entity_category: diagnostic
+    lambda: |-
+      auto data = id(ups).get_data();
+      if (!data.connected || data.battery_voltage <= 0) return NAN;
+      return data.battery_voltage;
+    update_interval: 5s
+
   - platform: template
     name: "Battery Capacity"
     id: battery_capacity
@@ -108,6 +124,9 @@ sensor:
       return data.remaining_runtime_sec / 60.0f;
     update_interval: 5s
 
+  # Percent load applies to the nameplate rating. Prefer the active
+  # power rating (W) the UPS reports; fall back to apparent power (VA)
+  # scaled by a typical power factor only if the UPS does not report it.
   - platform: template
     name: "Load"
     id: load_watt
@@ -117,8 +136,12 @@ sensor:
     accuracy_decimals: 0
     lambda: |-
       auto data = id(ups).get_data();
-      if (!data.connected || data.rating_power_va <= 0) return NAN;
-      return data.load_percent / 100.0f * data.rating_power_va * 0.6f;
+      if (!data.connected) return NAN;
+      if (data.rating_power_w > 0)
+        return data.load_percent / 100.0f * data.rating_power_w;
+      if (data.rating_power_va > 0)
+        return data.load_percent / 100.0f * data.rating_power_va * 0.6f;
+      return NAN;
     update_interval: 5s
 
   - platform: template
@@ -147,6 +170,24 @@ sensor:
       return data.rating_power_va;
     update_interval: 60s
 
+  # Nameplate active power. NAN when the UPS does not report it — in
+  # that case the Load sensor above falls back to the VA rating.
+  - platform: template
+    name: "Rating Power Active"
+    id: rating_power_w
+    unit_of_measurement: "W"
+    icon: "mdi:flash"
+    entity_category: diagnostic
+    accuracy_decimals: 0
+    lambda: |-
+      auto data = id(ups).get_data();
+      if (!data.connected || data.rating_power_w <= 0) return NAN;
+      return data.rating_power_w;
+    update_interval: 60s
+
+  # Nominal *mains* voltage (230 V in Europe). If this shows something
+  # like 24 V, the Input collection was not found and the reading came
+  # from PowerSummary, i.e. the battery — please report it, see README.
   - platform: template
     name: "Rating Voltage"
     id: rating_voltage

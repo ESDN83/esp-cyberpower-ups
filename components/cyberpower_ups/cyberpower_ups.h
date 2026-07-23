@@ -107,11 +107,13 @@ struct UpsData {
   // Sensor values
   float utility_voltage = 0;
   float output_voltage = 0;
+  float battery_voltage = 0;   // PowerSummary voltage, i.e. the battery pack
   float battery_capacity = 0;
   float remaining_runtime_sec = 0;
   float load_percent = 0;
-  float rating_voltage = 0;
+  float rating_voltage = 0;    // nominal mains voltage
   float rating_power_va = 0;
+  float rating_power_w = 0;    // nameplate active power, 0 if not reported
 
   // Binary status
   bool ac_present = true;
@@ -756,49 +758,56 @@ class CyberpowerUpsComponent : public Component {
     log_ring_append_(s);
   }
 
-  void dump_usage_resolution_(const char *label, uint16_t page, uint16_t usage) {
-    char msg[160];
-    const HidField *picked = report_map_.find(page, usage);
-
-    int candidates = 0;
-    for (auto &f : report_map_.fields)
-      if (f.usage_page == page && f.usage == usage) candidates++;
+  // One line per lookup the poller actually performs, so the dump can be
+  // read as "this is where each sensor gets its number from".
+  // eff= is the exponent after resolving the unit's built-in scale; that
+  // is the factor of ten actually applied.
+  void dump_usage_resolution_(const char *label, uint16_t page, uint16_t usage,
+                              uint16_t collection) {
+    char msg[192];
+    const HidField *picked = report_map_.find(page, usage, collection);
+    int candidates = report_map_.count(page, usage);
 
     if (!picked) {
-      snprintf(msg, sizeof(msg), "  %-16s %04X/%04X -> NOT FOUND",
-               label, (unsigned) page, (unsigned) usage);
+      snprintf(msg, sizeof(msg),
+               "  %-16s %04X/%04X coll=%04X -> NOT FOUND  [%d on this usage]",
+               label, (unsigned) page, (unsigned) usage,
+               (unsigned) collection, candidates);
       log_both_(msg);
       return;
     }
 
     snprintf(msg, sizeof(msg),
-             "  %-16s %04X/%04X -> rpt=%u/%s off=%u len=%u exp=%d  [%d candidate(s)]",
-             label, (unsigned) page, (unsigned) usage,
+             "  %-16s %04X/%04X coll=%04X -> rpt=%u/%s off=%u len=%u exp=%d unit=%08X eff=%d  [%d on this usage]",
+             label, (unsigned) page, (unsigned) usage, (unsigned) collection,
              (unsigned) picked->report_id, report_type_name_(picked->report_type),
              (unsigned) picked->bit_offset, (unsigned) picked->bit_size,
-             (int) picked->unit_exponent, candidates);
+             (int) picked->unit_exponent, (unsigned) picked->unit,
+             (int) hid_unit_exponent(picked->unit, picked->unit_exponent),
+             candidates);
     log_both_(msg);
 
-    // Several fields carry this usage and find() cannot tell them apart,
-    // so list them all — the one it picks is merely the first in
-    // descriptor order and need not be the right one.
+    // Usage occurs more than once: list every copy with its collection,
+    // so a wrong pick on an untested model can be spotted from the log
+    // alone.
     if (candidates > 1) {
-      int n = 0;
       for (auto &f : report_map_.fields) {
         if (f.usage_page != page || f.usage != usage) continue;
         snprintf(msg, sizeof(msg),
-                 "      cand %d: rpt=%u/%-7s off=%3u len=%2u log=%d..%d exp=%d%s",
-                 n++, (unsigned) f.report_id, report_type_name_(f.report_type),
+                 "      coll=%04X rpt=%u/%-7s off=%3u len=%2u log=%d..%d exp=%d unit=%08X%s",
+                 (unsigned) f.collection, (unsigned) f.report_id,
+                 report_type_name_(f.report_type),
                  (unsigned) f.bit_offset, (unsigned) f.bit_size,
-                 (int) f.logical_min, (int) f.logical_max, (int) f.unit_exponent,
-                 (&f == picked) ? "  <-- picked" : "");
+                 (int) f.logical_min, (int) f.logical_max,
+                 (int) f.unit_exponent, (unsigned) f.unit,
+                 (&f == picked) ? "  <-- used" : "");
         log_both_(msg);
       }
     }
   }
 
   void dump_report_map_() {
-    char msg[160];
+    char msg[192];
 
     // Resolution summary first, and to both sinks. The ESPHome API log
     // buffer drops bursts (45 fields at once cost us the whole tail of
@@ -807,12 +816,24 @@ class CyberpowerUpsComponent : public Component {
     snprintf(msg, sizeof(msg), "===== usage resolution (%d fields parsed) =====",
              (int) report_map_.fields.size());
     log_both_(msg);
-    dump_usage_resolution_("Voltage",        USAGE_PAGE_POWER_DEVICE, PD_USAGE_VOLTAGE);
-    dump_usage_resolution_("ConfigVoltage",  USAGE_PAGE_POWER_DEVICE, PD_USAGE_CONFIG_VOLTAGE);
-    dump_usage_resolution_("PercentLoad",    USAGE_PAGE_POWER_DEVICE, PD_USAGE_PERCENT_LOAD);
-    dump_usage_resolution_("ConfigApparentP", USAGE_PAGE_POWER_DEVICE, PD_USAGE_CONFIG_APPARENT_POWER);
-    dump_usage_resolution_("RemainingCap",   USAGE_PAGE_BATTERY,      BAT_USAGE_REMAINING_CAPACITY);
-    dump_usage_resolution_("RuntimeToEmpty", USAGE_PAGE_BATTERY,      BAT_USAGE_RUNTIME_TO_EMPTY);
+    dump_usage_resolution_("UtilityVoltage", USAGE_PAGE_POWER_DEVICE,
+                           PD_USAGE_VOLTAGE, PD_COLL_INPUT);
+    dump_usage_resolution_("OutputVoltage",  USAGE_PAGE_POWER_DEVICE,
+                           PD_USAGE_VOLTAGE, PD_COLL_OUTPUT);
+    dump_usage_resolution_("BatteryVoltage", USAGE_PAGE_POWER_DEVICE,
+                           PD_USAGE_VOLTAGE, PD_COLL_POWER_SUMMARY);
+    dump_usage_resolution_("RatingVoltage",  USAGE_PAGE_POWER_DEVICE,
+                           PD_USAGE_CONFIG_VOLTAGE, PD_COLL_INPUT);
+    dump_usage_resolution_("PercentLoad",    USAGE_PAGE_POWER_DEVICE,
+                           PD_USAGE_PERCENT_LOAD, 0);
+    dump_usage_resolution_("RatingPowerVA",  USAGE_PAGE_POWER_DEVICE,
+                           PD_USAGE_CONFIG_APPARENT_POWER, 0);
+    dump_usage_resolution_("RatingPowerW",   USAGE_PAGE_POWER_DEVICE,
+                           PD_USAGE_CONFIG_ACTIVE_POWER, 0);
+    dump_usage_resolution_("RemainingCap",   USAGE_PAGE_BATTERY,
+                           BAT_USAGE_REMAINING_CAPACITY, 0);
+    dump_usage_resolution_("RuntimeToEmpty", USAGE_PAGE_BATTERY,
+                           BAT_USAGE_RUNTIME_TO_EMPTY, 0);
     log_both_("===== full field table follows on the web UI /log page =====");
 
     // Bulk table to the ring buffer only: it holds 8 KB, enough for the
@@ -820,11 +841,13 @@ class CyberpowerUpsComponent : public Component {
     int i = 0;
     for (auto &f : report_map_.fields) {
       snprintf(msg, sizeof(msg),
-               "  [%02d] %04X/%04X rpt=%u/%-7s off=%3u len=%2u log=%d..%d exp=%d",
+               "  [%02d] %04X/%04X coll=%04X rpt=%u/%-7s off=%3u len=%2u log=%d..%d exp=%d unit=%08X",
                i++, (unsigned) f.usage_page, (unsigned) f.usage,
+               (unsigned) f.collection,
                (unsigned) f.report_id, report_type_name_(f.report_type),
                (unsigned) f.bit_offset, (unsigned) f.bit_size,
-               (int) f.logical_min, (int) f.logical_max, (int) f.unit_exponent);
+               (int) f.logical_min, (int) f.logical_max,
+               (int) f.unit_exponent, (unsigned) f.unit);
       log_ring_append_(msg);
     }
   }
@@ -870,6 +893,16 @@ class CyberpowerUpsComponent : public Component {
     uint8_t *data = report_buf + 1;
 
     value = extract_field_value(data, *field);
+    return true;
+  }
+
+  // ── Read a field and convert it to its physical value ─────
+  // Use this for measurements. Status bits carry no unit and are read
+  // with read_field_value_ instead.
+  bool read_field_scaled_(const HidField *field, float &value) {
+    int32_t raw;
+    if (!read_field_value_(field, raw)) return false;
+    value = scale_field_value(*field, raw);
     return true;
   }
 
@@ -1028,30 +1061,54 @@ class CyberpowerUpsComponent : public Component {
     xSemaphoreGive(data_mutex_);
 
     int32_t val;
+    float   fval;
 
     // ── Sensor values (no mutex held — transfers can take seconds) ──
+    //
+    // Voltage (0x30) and ConfigVoltage (0x40) each occur once per
+    // collection, so both are looked up with the collection that gives
+    // them their meaning. Without it the first copy in descriptor order
+    // wins, which on a BR1200ELCD is the PowerSummary one — the battery.
+    // That is how mains voltage came to read a rock-steady 252 V: the
+    // raw 252 was a float-charged 24 V pack at 25.2 V.
 
-    auto *f = report_map_.find(USAGE_PAGE_POWER_DEVICE, PD_USAGE_VOLTAGE);
-    if (f && read_field_value_(f, val)) tmp.utility_voltage = (float)val;
+    auto *f = report_map_.find(USAGE_PAGE_POWER_DEVICE, PD_USAGE_VOLTAGE, PD_COLL_INPUT);
+    if (f && read_field_scaled_(f, fval)) tmp.utility_voltage = fval;
+
+    f = report_map_.find(USAGE_PAGE_POWER_DEVICE, PD_USAGE_VOLTAGE, PD_COLL_OUTPUT);
+    if (f && read_field_scaled_(f, fval)) {
+      tmp.output_voltage = fval;
+    } else {
+      // No Output collection: on a line-interactive UPS running on mains
+      // the output tracks the input closely enough to stand in for it.
+      tmp.output_voltage = tmp.utility_voltage;
+    }
+
+    f = report_map_.find(USAGE_PAGE_POWER_DEVICE, PD_USAGE_VOLTAGE, PD_COLL_POWER_SUMMARY);
+    if (f && read_field_scaled_(f, fval)) tmp.battery_voltage = fval;
 
     f = report_map_.find(USAGE_PAGE_BATTERY, BAT_USAGE_REMAINING_CAPACITY);
-    if (f && read_field_value_(f, val)) tmp.battery_capacity = (float)val;
+    if (f && read_field_scaled_(f, fval)) tmp.battery_capacity = fval;
 
     f = report_map_.find(USAGE_PAGE_BATTERY, BAT_USAGE_RUNTIME_TO_EMPTY);
-    if (f && read_field_value_(f, val)) tmp.remaining_runtime_sec = (float)val;
+    if (f && read_field_scaled_(f, fval)) tmp.remaining_runtime_sec = fval;
 
     f = report_map_.find(USAGE_PAGE_POWER_DEVICE, PD_USAGE_PERCENT_LOAD);
-    if (f && read_field_value_(f, val)) tmp.load_percent = (float)val;
+    if (f && read_field_scaled_(f, fval)) tmp.load_percent = fval;
 
-    f = report_map_.find(USAGE_PAGE_POWER_DEVICE, PD_USAGE_CONFIG_VOLTAGE);
-    if (f && read_field_value_(f, val)) tmp.rating_voltage = (float)val;
+    // Nominal mains voltage lives in the Input collection; the
+    // PowerSummary copy is the nominal *battery* voltage (24 V here).
+    f = report_map_.find(USAGE_PAGE_POWER_DEVICE, PD_USAGE_CONFIG_VOLTAGE, PD_COLL_INPUT);
+    if (f && read_field_scaled_(f, fval)) tmp.rating_voltage = fval;
 
     f = report_map_.find(USAGE_PAGE_POWER_DEVICE, PD_USAGE_CONFIG_APPARENT_POWER);
-    if (f && read_field_value_(f, val)) tmp.rating_power_va = (float)val;
+    if (f && read_field_scaled_(f, fval)) tmp.rating_power_va = fval;
     // rating_power_va may also come from model name (set during connect)
 
-    // Output voltage — most CyberPower UPS report output same as input when on AC
-    tmp.output_voltage = tmp.utility_voltage;
+    // Nameplate active power. Reporting it removes the need to guess a
+    // power factor when converting percent load into watts.
+    f = report_map_.find(USAGE_PAGE_POWER_DEVICE, PD_USAGE_CONFIG_ACTIVE_POWER);
+    if (f && read_field_scaled_(f, fval)) tmp.rating_power_w = fval;
 
     // ── Binary status ──
 

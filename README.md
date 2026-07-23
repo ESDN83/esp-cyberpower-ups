@@ -65,10 +65,22 @@ See `esphome/cyberpower-ups.yaml` for the full configuration with all sensors.
 |--------|------|-------------|
 | Utility Voltage | V | Input voltage from mains |
 | Output Voltage | V | UPS output voltage |
+| Battery Voltage | V | Battery pack voltage (diagnostic) |
 | Battery Capacity | % | Current battery capacity |
 | Remaining Runtime | min | Estimated remaining runtime on battery |
 | Load | W | Current load in watts |
 | Load Percent | % | Load percentage |
+| Rating Voltage | V | Nominal **mains** voltage, e.g. 230 (diagnostic) |
+| Rating Power | VA | Nameplate apparent power (diagnostic) |
+| Rating Power Active | W | Nameplate active power, if reported (diagnostic) |
+
+> **Sanity check after first flash.** Utility Voltage should sit near your
+> mains (~230 V in Europe) and drift by a volt or two over the day.
+> Battery Voltage should be a low double-digit number (~13 V, ~27 V, ~41 V
+> depending on pack size). If Utility Voltage is pinned to an unchanging
+> value and Rating Voltage reads something like 24 or 48, the component
+> picked the battery fields for mains — see
+> [Reporting a problem](#reporting-a-problem).
 
 ### Status
 | Sensor | Type | Description |
@@ -209,6 +221,93 @@ HID Report Parser → State Machine ─┴─ Command Queue
     ├──→ ESPHome API → Home Assistant (Sensors + Events + Buttons)
     └──→ Web UI (Port 80, Live Status)
 ```
+
+## Reporting a problem
+
+Every UPS model ships its own HID report descriptor, and this component
+has only been verified against the models listed under [Hardware](#hardware).
+If a reading looks wrong on your unit, the report descriptor is almost
+always where the answer is — and you can capture it in under a minute.
+
+### 1. Grab the report map
+
+Open the device's web UI log page:
+
+```
+http://<device-ip>/log
+```
+
+On every USB connect the component dumps the parsed HID report
+descriptor there. Copy the whole thing — it looks like this:
+
+```
+===== usage resolution (45 fields parsed) =====
+  UtilityVoltage   0084/0030 coll=001A -> rpt=35/FEATURE off=0 len=16 exp=7 unit=00F0D121 eff=0  [3 on this usage]
+      coll=0024 rpt= 32/FEATURE off=  8 len=16 log=0..65535 exp=6 unit=00F0D121
+      coll=001A rpt= 35/FEATURE off=  0 len=16 log=0..350   exp=7 unit=00F0D121  <-- used
+      coll=001C rpt= 35/FEATURE off= 16 len=16 log=0..300   exp=7 unit=00F0D121
+  ...
+===== full field table follows on the web UI /log page =====
+  [17] 0084/0030 coll=0024 rpt=32/FEATURE off=  8 len=16 log=0..65535 exp=6 unit=00F0D121
+  ...
+```
+
+> Use the web UI page, not the ESPHome log. The full table is 40+ lines
+> and a burst that size overruns the ESPHome API log buffer — you will
+> silently lose most of it. The web UI reads from an 8 KB ring buffer on
+> the device and keeps everything.
+
+### 2. Open an issue with
+
+- **UPS model** exactly as printed on the label, plus the `UPS Model` sensor value
+- **The report map** from step 1, complete
+- **What is wrong**: the sensor, the value it shows, and the value you expect
+- **A reference measurement** if you have one — a smart meter, a plug-in
+  power meter, anything independent. "The UPS says 252 V, my energy meter
+  on the same circuit says 231 V" is worth more than any amount of prose.
+- Whether the wrong value **changes over time or is frozen**. A reading
+  that never moves is the strongest hint that the wrong field is being
+  read; check the history in Home Assistant, not just the current value.
+
+### Reading the dump yourself
+
+Most wrong readings come down to one thing: **a usage that occurs in
+more than one collection**. `Voltage` (usage `0030`) is declared
+identically under Input, Output and PowerSummary — the number alone does
+not say whether it is mains, output or battery voltage. Only the
+enclosing collection does.
+
+| `coll=` | Collection | Meaning of a Voltage in it |
+|---------|------------|----------------------------|
+| `001A` | Input | Mains voltage |
+| `001C` | Output | UPS output voltage |
+| `0024` | PowerSummary | **Battery** voltage |
+| `0010` | BatterySystem | Battery subsystem |
+
+The `[N on this usage]` counter tells you how many copies exist, and the
+lines below it list every one with `<-- used` marking the chosen field.
+If the marker sits on the wrong collection, that is your bug.
+
+`eff=` is the exponent actually applied after resolving the unit's
+built-in scale — `eff=0` means the raw value is used as-is, `eff=-1`
+means it is divided by ten. A wrong `eff` shows up as a reading off by a
+clean factor of ten. If `unit=00000000` on a value that should have a
+unit, the descriptor did not declare one and no scaling is applied at
+all; include that in the report.
+
+<details>
+<summary>Worked example: BR1200ELCD reporting 252 V mains</summary>
+
+Utility Voltage sat at exactly 252 V for 23 hours while an energy meter
+on the same house read 228–233 V and varied normally. The dump showed
+three `0084/0030` fields, and the one being used was `coll=0024` —
+PowerSummary, i.e. the battery. With `exp=6` against the HID voltage
+unit's built-in exponent of 7, the effective exponent is −1, so the raw
+252 meant **25.2 V**: a float-charged 24 V pack, which is exactly why it
+never moved. The fix was to look the usage up within `coll=001A` (Input)
+instead of taking whichever copy the descriptor declared first.
+
+</details>
 
 ## License
 

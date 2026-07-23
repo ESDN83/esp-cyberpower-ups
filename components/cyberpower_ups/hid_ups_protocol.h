@@ -23,11 +23,24 @@ static constexpr uint16_t USAGE_PAGE_POWER_DEVICE  = 0x0084;
 static constexpr uint16_t USAGE_PAGE_BATTERY       = 0x0085;
 static constexpr uint16_t USAGE_PAGE_GENERIC       = 0x0001;
 
+// ── Power Device Page (0x84) — collection usages ────────────
+// These name COLLECTIONs, not values. They matter because a measurement
+// usage on its own is ambiguous: Voltage (0x30) appears identically
+// under Input, Output and PowerSummary, and only the enclosing
+// collection says whether it is mains, output or battery voltage.
+static constexpr uint16_t PD_COLL_UPS            = 0x0004;
+static constexpr uint16_t PD_COLL_BATTERY_SYSTEM = 0x0010;
+static constexpr uint16_t PD_COLL_POWER_CONVERTER= 0x0016;
+static constexpr uint16_t PD_COLL_INPUT          = 0x001A;
+static constexpr uint16_t PD_COLL_OUTPUT         = 0x001C;
+static constexpr uint16_t PD_COLL_FLOW           = 0x001E;
+static constexpr uint16_t PD_COLL_POWER_SUMMARY  = 0x0024;
+
 // ── Power Device Page (0x84) Usages ─────────────────────────
 static constexpr uint16_t PD_USAGE_UPS              = 0x0004;
-static constexpr uint16_t PD_USAGE_FLOW             = 0x001A;
 static constexpr uint16_t PD_USAGE_INPUT            = 0x001A;
 static constexpr uint16_t PD_USAGE_OUTPUT           = 0x001C;
+static constexpr uint16_t PD_USAGE_PRESENT_STATUS   = 0x0002;
 static constexpr uint16_t PD_USAGE_VOLTAGE          = 0x0030;
 static constexpr uint16_t PD_USAGE_CURRENT          = 0x0031;
 static constexpr uint16_t PD_USAGE_FREQUENCY        = 0x0032;
@@ -38,9 +51,8 @@ static constexpr uint16_t PD_USAGE_CONFIG_VOLTAGE   = 0x0040;
 static constexpr uint16_t PD_USAGE_CONFIG_CURRENT   = 0x0041;
 static constexpr uint16_t PD_USAGE_CONFIG_FREQUENCY = 0x0042;
 static constexpr uint16_t PD_USAGE_CONFIG_APPARENT_POWER = 0x0043;
-static constexpr uint16_t PD_USAGE_PRESENT_STATUS   = 0x0024;
+static constexpr uint16_t PD_USAGE_CONFIG_ACTIVE_POWER   = 0x0044;
 static constexpr uint16_t PD_USAGE_SWITCHABLE       = 0x006B;
-static constexpr uint16_t PD_USAGE_TEST             = 0x001E;
 
 // ── Power Device Page (0x84) — writable command usages ──────
 // These live in FEATURE reports and are written via SET_REPORT to
@@ -105,26 +117,51 @@ struct HidField {
   int32_t  logical_min;
   int32_t  logical_max;
   int8_t   unit_exponent;
+  uint32_t unit;         // HID UNIT item (0x64); 0 = not declared
+  uint16_t collection;   // innermost scoping COLLECTION usage; 0 = none
 };
 
 // Parsed report descriptor with all fields we care about
 struct HidReportMap {
   std::vector<HidField> fields;
 
-  // Find a field by usage page + usage
-  const HidField *find(uint16_t usage_page, uint16_t usage, ReportType type = ReportType::FEATURE) const {
+  // Find a field by usage page + usage, optionally restricted to the
+  // collection that encloses it.
+  //
+  // Pass a collection whenever the usage is ambiguous. Voltage (0x30)
+  // occurs once per Input / Output / PowerSummary collection, and
+  // without the filter this returns whichever the descriptor happens to
+  // declare first — on a CyberPower BR1200ELCD that is the PowerSummary
+  // copy, i.e. the battery, not the mains.
+  //
+  // collection == 0 keeps the old any-collection behaviour, which is
+  // correct for usages that occur exactly once.
+  const HidField *find(uint16_t usage_page, uint16_t usage,
+                       uint16_t collection = 0,
+                       ReportType type = ReportType::FEATURE) const {
     for (auto &f : fields) {
-      if (f.usage_page == usage_page && f.usage == usage && f.report_type == type)
+      if (f.usage_page == usage_page && f.usage == usage &&
+          f.report_type == type &&
+          (collection == 0 || f.collection == collection))
         return &f;
     }
     // Fallback: try any report type
     if (type != ReportType::INPUT) {
       for (auto &f : fields) {
-        if (f.usage_page == usage_page && f.usage == usage)
+        if (f.usage_page == usage_page && f.usage == usage &&
+            (collection == 0 || f.collection == collection))
           return &f;
       }
     }
     return nullptr;
+  }
+
+  // How many fields carry this page+usage (ignoring collection)?
+  int count(uint16_t usage_page, uint16_t usage) const {
+    int n = 0;
+    for (auto &f : fields)
+      if (f.usage_page == usage_page && f.usage == usage) n++;
+    return n;
   }
 };
 
@@ -137,6 +174,28 @@ struct HidReportMap {
 //   - Global state: usage_page, report_id, report_size, report_count, logical_min/max
 //   - Local state: usage (resets after each Main item)
 //   - Bit offsets per report_id
+// Pick the collection that gives a measurement its meaning.
+//
+// Walks the open collections from innermost outwards and returns the
+// first one that scopes a measurement. A descriptor may nest a Flow
+// collection inside Input; for our purposes that is still Input, so
+// Flow is deliberately not in the list. Falls back to the innermost
+// collection when nothing matches, and to 0 at the top level.
+static uint16_t scoping_collection(const uint16_t *stack, size_t depth) {
+  for (size_t i = depth; i-- > 0;) {
+    switch (stack[i]) {
+      case PD_COLL_INPUT:
+      case PD_COLL_OUTPUT:
+      case PD_COLL_POWER_SUMMARY:
+      case PD_COLL_BATTERY_SYSTEM:
+        return stack[i];
+      default:
+        break;
+    }
+  }
+  return depth ? stack[depth - 1] : 0;
+}
+
 static bool parse_report_descriptor(const uint8_t *desc, size_t len, HidReportMap &map) {
   // Global state
   uint16_t usage_page = 0;
@@ -146,11 +205,19 @@ static bool parse_report_descriptor(const uint8_t *desc, size_t len, HidReportMa
   int32_t  logical_min = 0;
   int32_t  logical_max = 0;
   int8_t   unit_exponent = 0;
+  uint32_t unit = 0;
 
   // Local state (usage stack for multi-usage fields)
   static constexpr size_t MAX_USAGES = 64;
   uint16_t usages[MAX_USAGES];
   size_t   usage_count = 0;
+
+  // Open COLLECTIONs, innermost last. Depth 12 is far beyond anything a
+  // Power Device descriptor nests; deeper input is clamped rather than
+  // overflowing, and the extra levels simply do not scope anything.
+  static constexpr size_t MAX_COLL_DEPTH = 12;
+  uint16_t coll_stack[MAX_COLL_DEPTH];
+  size_t   coll_depth = 0;
 
   // Track bit offset per report_id (separate for input/feature/output)
   // Key: (report_type << 8) | report_id → bit offset
@@ -212,6 +279,12 @@ static bool parse_report_descriptor(const uint8_t *desc, size_t len, HidReportMa
         unit_exponent = (int8_t)(data_unsigned & 0x0F);
         if (unit_exponent > 7) unit_exponent -= 16;  // nibble sign extension
         break;
+      case (uint8_t)HidItemType::UNIT:
+        // Needed to interpret UNIT_EXPONENT: the declared exponent is
+        // relative to the unit's own built-in scale. See
+        // hid_unit_exponent() at the bottom of this file.
+        unit = data_unsigned;
+        break;
 
       // ── Local items ──
       case (uint8_t)HidItemType::USAGE:
@@ -243,6 +316,8 @@ static bool parse_report_descriptor(const uint8_t *desc, size_t len, HidReportMa
             field.logical_min = logical_min;
             field.logical_max = logical_max;
             field.unit_exponent = unit_exponent;
+            field.unit = unit;
+            field.collection = scoping_collection(coll_stack, coll_depth);
             map.fields.push_back(field);
           }
           bit_offsets[rt_idx][report_id] += report_size;
@@ -254,11 +329,17 @@ static bool parse_report_descriptor(const uint8_t *desc, size_t len, HidReportMa
       }
 
       case (uint8_t)HidItemType::COLLECTION:
-        // Push collection usage onto stack (simplified — we just reset local)
+        // The collection takes the first unused local Usage (HID 1.11,
+        // 6.2.2.4). Keeping that on a stack is what lets an otherwise
+        // ambiguous measurement usage be resolved later.
+        if (coll_depth < MAX_COLL_DEPTH)
+          coll_stack[coll_depth++] = (usage_count > 0) ? usages[0] : 0;
         usage_count = 0;
         break;
 
       case (uint8_t)HidItemType::END_COLLECTION:
+        if (coll_depth > 0) coll_depth--;
+        usage_count = 0;
         break;
 
       default:
@@ -329,6 +410,58 @@ static float apply_exponent(int32_t raw, int8_t exponent) {
     for (int i = 0; i < -exponent; i++) val /= 10.0f;
   }
   return val;
+}
+
+// ── Unit exponent resolution ────────────────────────────────
+// UNIT_EXPONENT is not an absolute power of ten. It is stated relative
+// to the built-in scale of the UNIT the field carries: HID expresses
+// voltage in units that already imply 10^7, so a descriptor declaring
+// exponent 7 means volts and one declaring 6 means tenths of a volt.
+// Applying the declared exponent on its own would be wrong by that
+// built-in factor.
+//
+// Table and arithmetic follow NUT's HIDUnits[] and get_unit_expo() in
+// drivers/libhid.c, the de-facto reference for HID Power Device parsing.
+//
+// NUT additionally maps logical to physical range via PHYSICAL_MINIMUM
+// and PHYSICAL_MAXIMUM. This parser does not read those items, which is
+// equivalent to them being absent — the case in which NUT also passes
+// the logical value through unchanged. No Power Device descriptor seen
+// so far declares them.
+struct HidUnitScale {
+  uint32_t unit;
+  int8_t   expo;
+};
+
+static constexpr HidUnitScale HID_UNIT_SCALES[] = {
+  { 0x00F0D121, 7 },  // volt
+  { 0x00100001, 0 },  // ampere
+  { 0x0000D121, 7 },  // volt-ampere / watt
+  { 0x00001001, 0 },  // second
+  { 0x00010001, 0 },  // kelvin
+  { 0x0000F001, 0 },  // hertz
+  { 0x00101001, 0 },  // ampere-second
+};
+
+// Effective power of ten for a raw field value.
+//
+// Returns 0 — no scaling — when the unit is absent or unrecognised.
+// NUT falls through to the declared exponent in that case; this does
+// not, because a wrong guess moves a reading by a factor of ten and the
+// component runs against models nobody here can test. Unrecognised
+// units show up in the report-map dump with their raw value, so an
+// entry can be added once one is actually observed.
+static int8_t hid_unit_exponent(uint32_t unit, int8_t declared) {
+  if (unit == 0) return 0;
+  for (auto &u : HID_UNIT_SCALES) {
+    if (u.unit == unit) return (int8_t)(declared - u.expo);
+  }
+  return 0;
+}
+
+// Raw extracted value -> physical value, honouring unit and exponent.
+static float scale_field_value(const HidField &field, int32_t raw) {
+  return apply_exponent(raw, hid_unit_exponent(field.unit, field.unit_exponent));
 }
 
 }  // namespace cyberpower_ups
