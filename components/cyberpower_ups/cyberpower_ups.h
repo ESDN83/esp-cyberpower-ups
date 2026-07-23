@@ -757,33 +757,66 @@ class CyberpowerUpsComponent : public Component {
   }
 
   void dump_usage_resolution_(const char *label, uint16_t page, uint16_t usage) {
+    char msg[160];
+    const HidField *picked = report_map_.find(page, usage);
+
     int candidates = 0;
     for (auto &f : report_map_.fields)
       if (f.usage_page == page && f.usage == usage) candidates++;
 
-    char msg[160];
-    const HidField *f = report_map_.find(page, usage);
-    if (!f) {
+    if (!picked) {
       snprintf(msg, sizeof(msg), "  %-16s %04X/%04X -> NOT FOUND",
                label, (unsigned) page, (unsigned) usage);
-    } else {
-      snprintf(msg, sizeof(msg),
-               "  %-16s %04X/%04X -> rpt=%u/%s off=%u len=%u exp=%d  [%d candidate(s)]",
-               label, (unsigned) page, (unsigned) usage,
-               (unsigned) f->report_id, report_type_name_(f->report_type),
-               (unsigned) f->bit_offset, (unsigned) f->bit_size,
-               (int) f->unit_exponent, candidates);
+      log_both_(msg);
+      return;
     }
+
+    snprintf(msg, sizeof(msg),
+             "  %-16s %04X/%04X -> rpt=%u/%s off=%u len=%u exp=%d  [%d candidate(s)]",
+             label, (unsigned) page, (unsigned) usage,
+             (unsigned) picked->report_id, report_type_name_(picked->report_type),
+             (unsigned) picked->bit_offset, (unsigned) picked->bit_size,
+             (int) picked->unit_exponent, candidates);
     log_both_(msg);
+
+    // Several fields carry this usage and find() cannot tell them apart,
+    // so list them all — the one it picks is merely the first in
+    // descriptor order and need not be the right one.
+    if (candidates > 1) {
+      int n = 0;
+      for (auto &f : report_map_.fields) {
+        if (f.usage_page != page || f.usage != usage) continue;
+        snprintf(msg, sizeof(msg),
+                 "      cand %d: rpt=%u/%-7s off=%3u len=%2u log=%d..%d exp=%d%s",
+                 n++, (unsigned) f.report_id, report_type_name_(f.report_type),
+                 (unsigned) f.bit_offset, (unsigned) f.bit_size,
+                 (int) f.logical_min, (int) f.logical_max, (int) f.unit_exponent,
+                 (&f == picked) ? "  <-- picked" : "");
+        log_both_(msg);
+      }
+    }
   }
 
   void dump_report_map_() {
     char msg[160];
 
-    snprintf(msg, sizeof(msg), "===== HID report map: %d fields =====",
+    // Resolution summary first, and to both sinks. The ESPHome API log
+    // buffer drops bursts (45 fields at once cost us the whole tail of
+    // this dump once already), so the part that actually answers the
+    // question has to come out before the bulk.
+    snprintf(msg, sizeof(msg), "===== usage resolution (%d fields parsed) =====",
              (int) report_map_.fields.size());
     log_both_(msg);
+    dump_usage_resolution_("Voltage",        USAGE_PAGE_POWER_DEVICE, PD_USAGE_VOLTAGE);
+    dump_usage_resolution_("ConfigVoltage",  USAGE_PAGE_POWER_DEVICE, PD_USAGE_CONFIG_VOLTAGE);
+    dump_usage_resolution_("PercentLoad",    USAGE_PAGE_POWER_DEVICE, PD_USAGE_PERCENT_LOAD);
+    dump_usage_resolution_("ConfigApparentP", USAGE_PAGE_POWER_DEVICE, PD_USAGE_CONFIG_APPARENT_POWER);
+    dump_usage_resolution_("RemainingCap",   USAGE_PAGE_BATTERY,      BAT_USAGE_REMAINING_CAPACITY);
+    dump_usage_resolution_("RuntimeToEmpty", USAGE_PAGE_BATTERY,      BAT_USAGE_RUNTIME_TO_EMPTY);
+    log_both_("===== full field table follows on the web UI /log page =====");
 
+    // Bulk table to the ring buffer only: it holds 8 KB, enough for the
+    // whole map, and writing it there cannot starve the API logger.
     int i = 0;
     for (auto &f : report_map_.fields) {
       snprintf(msg, sizeof(msg),
@@ -792,17 +825,8 @@ class CyberpowerUpsComponent : public Component {
                (unsigned) f.report_id, report_type_name_(f.report_type),
                (unsigned) f.bit_offset, (unsigned) f.bit_size,
                (int) f.logical_min, (int) f.logical_max, (int) f.unit_exponent);
-      log_both_(msg);
+      log_ring_append_(msg);
     }
-
-    log_both_("===== usage resolution: which field find() returns =====");
-    dump_usage_resolution_("Voltage",        USAGE_PAGE_POWER_DEVICE, PD_USAGE_VOLTAGE);
-    dump_usage_resolution_("ConfigVoltage",  USAGE_PAGE_POWER_DEVICE, PD_USAGE_CONFIG_VOLTAGE);
-    dump_usage_resolution_("PercentLoad",    USAGE_PAGE_POWER_DEVICE, PD_USAGE_PERCENT_LOAD);
-    dump_usage_resolution_("ConfigApparentP", USAGE_PAGE_POWER_DEVICE, PD_USAGE_CONFIG_APPARENT_POWER);
-    dump_usage_resolution_("RemainingCap",   USAGE_PAGE_BATTERY,      BAT_USAGE_REMAINING_CAPACITY);
-    dump_usage_resolution_("RuntimeToEmpty", USAGE_PAGE_BATTERY,      BAT_USAGE_RUNTIME_TO_EMPTY);
-    log_both_("=======================================================");
   }
 
   // ── Read a single HID Feature/Input Report ────────────────
