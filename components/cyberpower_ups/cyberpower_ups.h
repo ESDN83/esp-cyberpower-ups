@@ -723,9 +723,86 @@ class CyberpowerUpsComponent : public Component {
 
     if (ok) {
       ESP_LOGI(TAG, "Parsed %d HID fields", (int)report_map_.fields.size());
+      dump_report_map_();
     }
 
     return ok;
+  }
+
+  // ── Diagnostic: dump the parsed HID report map ────────────
+  // Purely diagnostic — reads nothing extra from the device and changes
+  // no behaviour. Output goes to the ESPHome log AND the web UI /log
+  // page, because a burst this size can outrun the API log buffer.
+  //
+  // Why this exists: parse_report_descriptor() carries no collection
+  // context (it resets local state on COLLECTION). A usage that appears
+  // inside several collections therefore lands in the map several times
+  // with nothing to tell the copies apart, and find() returns whichever
+  // comes first in descriptor order. Voltage (0x0030) is exactly such a
+  // usage — the HID Power Device Class places it under UPS.Input,
+  // UPS.Output and UPS.PowerSummary alike. This dump shows how many
+  // candidates exist per usage and which one is actually being read.
+  static const char *report_type_name_(ReportType t) {
+    switch (t) {
+      case ReportType::INPUT:   return "INPUT";
+      case ReportType::OUTPUT:  return "OUTPUT";
+      case ReportType::FEATURE: return "FEATURE";
+    }
+    return "?";
+  }
+
+  void log_both_(const char *s) {
+    ESP_LOGI(TAG, "%s", s);
+    log_ring_append_(s);
+  }
+
+  void dump_usage_resolution_(const char *label, uint16_t page, uint16_t usage) {
+    int candidates = 0;
+    for (auto &f : report_map_.fields)
+      if (f.usage_page == page && f.usage == usage) candidates++;
+
+    char msg[160];
+    const HidField *f = report_map_.find(page, usage);
+    if (!f) {
+      snprintf(msg, sizeof(msg), "  %-16s %04X/%04X -> NOT FOUND",
+               label, (unsigned) page, (unsigned) usage);
+    } else {
+      snprintf(msg, sizeof(msg),
+               "  %-16s %04X/%04X -> rpt=%u/%s off=%u len=%u exp=%d  [%d candidate(s)]",
+               label, (unsigned) page, (unsigned) usage,
+               (unsigned) f->report_id, report_type_name_(f->report_type),
+               (unsigned) f->bit_offset, (unsigned) f->bit_size,
+               (int) f->unit_exponent, candidates);
+    }
+    log_both_(msg);
+  }
+
+  void dump_report_map_() {
+    char msg[160];
+
+    snprintf(msg, sizeof(msg), "===== HID report map: %d fields =====",
+             (int) report_map_.fields.size());
+    log_both_(msg);
+
+    int i = 0;
+    for (auto &f : report_map_.fields) {
+      snprintf(msg, sizeof(msg),
+               "  [%02d] %04X/%04X rpt=%u/%-7s off=%3u len=%2u log=%d..%d exp=%d",
+               i++, (unsigned) f.usage_page, (unsigned) f.usage,
+               (unsigned) f.report_id, report_type_name_(f.report_type),
+               (unsigned) f.bit_offset, (unsigned) f.bit_size,
+               (int) f.logical_min, (int) f.logical_max, (int) f.unit_exponent);
+      log_both_(msg);
+    }
+
+    log_both_("===== usage resolution: which field find() returns =====");
+    dump_usage_resolution_("Voltage",        USAGE_PAGE_POWER_DEVICE, PD_USAGE_VOLTAGE);
+    dump_usage_resolution_("ConfigVoltage",  USAGE_PAGE_POWER_DEVICE, PD_USAGE_CONFIG_VOLTAGE);
+    dump_usage_resolution_("PercentLoad",    USAGE_PAGE_POWER_DEVICE, PD_USAGE_PERCENT_LOAD);
+    dump_usage_resolution_("ConfigApparentP", USAGE_PAGE_POWER_DEVICE, PD_USAGE_CONFIG_APPARENT_POWER);
+    dump_usage_resolution_("RemainingCap",   USAGE_PAGE_BATTERY,      BAT_USAGE_REMAINING_CAPACITY);
+    dump_usage_resolution_("RuntimeToEmpty", USAGE_PAGE_BATTERY,      BAT_USAGE_RUNTIME_TO_EMPTY);
+    log_both_("=======================================================");
   }
 
   // ── Read a single HID Feature/Input Report ────────────────
